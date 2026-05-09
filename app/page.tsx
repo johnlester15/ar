@@ -323,7 +323,7 @@ export default function GesturaFinal() {
                 digital conversation. Designed for the spatial era.
               </p>
               <div className="btn-group" style={{ justifyContent: 'center' }}>
-                <a href="#" className="btn btn-p">Explore System</a>
+                <a href="/main" className="btn btn-p">Explore System</a>
                 <a href="#" className="btn btn-s">The Philosophy</a>
               </div>
             </div>

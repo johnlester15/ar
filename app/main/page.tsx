@@ -1,57 +1,39 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 
 type Point = { x: number; y: number; z?: number };
 import { FilesetResolver, HandLandmarker } from "@mediapipe/tasks-vision";
 
-// ─── Enhanced ASL Detection Engine ───────────────────────────────────────────
-
-function dist(a: Point, b: Point): number {
-  return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2 + ((a.z || 0) - (b.z || 0)) ** 2);
-}
+// ─── Geometry Helpers ─────────────────────────────────────────────────────────
 
 function dist2D(a: Point, b: Point): number {
   return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
 }
 
-// Angle between three points (degrees)
-function angle(a: Point, b: Point, c: Point): number {
-  const ab = { x: a.x - b.x, y: a.y - b.y };
-  const cb = { x: c.x - b.x, y: c.y - b.y };
-  const dot = ab.x * cb.x + ab.y * cb.y;
-  const cross = ab.x * cb.y - ab.y * cb.x;
-  return Math.abs(Math.atan2(Math.abs(cross), dot) * 180 / Math.PI);
-}
-
-// Is a finger "extended" (straight up)?
 function isExtended(hand: Point[], tipIdx: number, pipIdx: number, mcpIdx: number): boolean {
-  const tip = hand[tipIdx];
-  const pip = hand[pipIdx];
-  const mcp = hand[mcpIdx];
-  return tip.y < pip.y && pip.y < mcp.y;
+  return hand[tipIdx].y < hand[pipIdx].y && hand[pipIdx].y < hand[mcpIdx].y;
 }
 
-// Is a finger "curled" (bent into palm)?
 function isCurled(hand: Point[], tipIdx: number, pipIdx: number): boolean {
   return hand[tipIdx].y > hand[pipIdx].y;
 }
 
-// Thumb extension: horizontal spread from palm
 function thumbExtended(hand: Point[]): boolean {
-  const tip = hand[4];
-  const base = hand[2];
-  const wrist = hand[0];
+  const tip = hand[4], base = hand[2], wrist = hand[0];
   return dist2D(tip, wrist) > dist2D(base, wrist) * 1.3;
 }
 
+// ─── ASL Detection ────────────────────────────────────────────────────────────
+
 function detectASLEnhanced(hand: Point[]): string {
   const wrist = hand[0];
-  const thumbTip = hand[4], thumbIp = hand[3], thumbMcp = hand[2], thumbCmc = hand[1];
-  const indexTip = hand[8], indexPip = hand[7], indexDip = hand[6], indexMcp = hand[5];
-  const middleTip = hand[12], middlePip = hand[11], middleMcp = hand[10];
-  const ringTip = hand[16], ringPip = hand[15], ringMcp = hand[14];
-  const pinkyTip = hand[20], pinkyPip = hand[19], pinkyMcp = hand[18];
+  const thumbTip = hand[4], thumbMcp = hand[2];
+  const indexTip = hand[8], indexPip = hand[6], indexMcp = hand[5];
+  const middleTip = hand[12], middlePip = hand[10], middleMcp = hand[9];
+  const ringTip = hand[16], ringPip = hand[14], ringMcp = hand[13];
+  const pinkyTip = hand[20], pinkyPip = hand[18], pinkyMcp = hand[17];
 
   const indexUp = isExtended(hand, 8, 7, 5);
   const middleUp = isExtended(hand, 12, 11, 9);
@@ -59,160 +41,55 @@ function detectASLEnhanced(hand: Point[]): string {
   const pinkyUp = isExtended(hand, 20, 19, 17);
   const thumbUp = thumbExtended(hand);
 
-  const indexCurled = isCurled(hand, 8, 6);
-  const middleCurled = isCurled(hand, 12, 10);
-  const ringCurled = isCurled(hand, 16, 14);
-  const pinkyCurled = isCurled(hand, 20, 18);
-
   const allDown = !indexUp && !middleUp && !ringUp && !pinkyUp;
   const allUp = indexUp && middleUp && ringUp && pinkyUp;
 
-  // Key distances
+  const palmSize = dist2D(wrist, hand[9]);
+  const norm = (d: number) => d / palmSize;
+
   const thumbIndex = dist2D(thumbTip, indexTip);
   const thumbMiddle = dist2D(thumbTip, middleTip);
-  const thumbRing = dist2D(thumbTip, ringTip);
-  const thumbPinky = dist2D(thumbTip, pinkyTip);
   const indexMiddle = dist2D(indexTip, middleTip);
   const middleRing = dist2D(middleTip, ringTip);
   const ringPinky = dist2D(ringTip, pinkyTip);
 
-  // Palm size for normalization
-  const palmSize = dist2D(wrist, hand[9]);
-  const norm = (d: number): number => d / palmSize;
-
-  // ─── Letter detection (improved) ──────────────────────────────────────────
-
-  // A: Fist, thumb to side (not over fingers)
-  if (allDown && !thumbUp && norm(thumbIndex) > 0.3 && thumbTip.y < indexMcp.y)
-    return "A";
-
-  // B: All four fingers up, thumb tucked across palm
-  if (allUp && !thumbUp && thumbTip.x > indexMcp.x && thumbTip.x < pinkyMcp.x)
-    return "B";
-
-  // C: Curved, all fingers bent similarly
-  if (!indexCurled && !middleCurled && !ringCurled && !pinkyCurled &&
-    norm(thumbIndex) > 0.15 && norm(thumbIndex) < 0.5 &&
-    indexTip.y > indexMcp.y - palmSize * 0.2)
-    return "C";
-
-  // D: Index up, others curled, thumb touches middle
-  if (indexUp && !middleUp && !ringUp && !pinkyUp && norm(thumbMiddle) < 0.2)
-    return "D";
-
-  // E: All fingers bent, thumb tucked under
-  if (!indexUp && !middleUp && !ringUp && !pinkyUp &&
-    thumbTip.y > indexTip.y && norm(thumbIndex) < 0.25)
-    return "E";
-
-  // F: Index+thumb touch, others up
-  if (norm(thumbIndex) < 0.1 && middleUp && ringUp && pinkyUp && !indexUp)
-    return "F";
-
-  // G: Index points sideways, thumb parallel
-  if (indexUp && !middleUp && !ringUp && !pinkyUp && thumbUp &&
-    Math.abs(indexTip.x - indexMcp.x) > palmSize * 0.2)
-    return "G";
-
-  // H: Index + middle extended sideways
-  if (indexUp && middleUp && !ringUp && !pinkyUp && !thumbUp &&
-    indexMiddle < palmSize * 0.25)
-    return "H";
-
-  // I: Only pinky up
-  if (!indexUp && !middleUp && !ringUp && pinkyUp && !thumbUp)
-    return "I";
-
-  // J: Only pinky up + thumb out (J involves motion but this is static approximation)
-  if (!indexUp && !middleUp && !ringUp && pinkyUp && thumbUp)
-    return "J";
-
-  // K: Index + middle up, thumb between them
-  if (indexUp && middleUp && !ringUp && !pinkyUp &&
-    thumbTip.y < hand[6].y && norm(thumbMiddle) < 0.35)
-    return "K";
-
-  // L: Index up + thumb out (L-shape)
-  if (indexUp && !middleUp && !ringUp && !pinkyUp && thumbUp &&
-    Math.abs(indexTip.x - wrist.x) < palmSize * 0.4)
-    return "L";
-
-  // M: Thumb under index+middle+ring (3 fingers over thumb)
-  if (allDown && thumbTip.y > indexTip.y && thumbTip.y > middleTip.y && thumbTip.y > ringTip.y &&
-    thumbTip.x > indexMcp.x)
-    return "M";
-
-  // N: Thumb under index+middle
-  if (allDown && thumbTip.y > indexTip.y && thumbTip.y > middleTip.y &&
-    thumbTip.y < ringTip.y && thumbTip.x > indexMcp.x)
-    return "N";
-
-  // O: All fingers curved to touch thumb
-  if (norm(thumbIndex) < 0.15 && norm(indexMiddle) < 0.2 &&
-    norm(middleRing) < 0.2 && norm(ringPinky) < 0.2)
-    return "O";
-
-  // P: Index pointing down, thumb out
-  if (indexUp && !middleUp && !ringUp && !pinkyUp && thumbUp &&
-    indexTip.y > wrist.y)
-    return "P";
-
-  // Q: Index + thumb pointing down
-  if (indexUp && !middleUp && !ringUp && !pinkyUp && thumbUp &&
-    thumbTip.y > thumbMcp.y && indexTip.y > indexMcp.y)
-    return "Q";
-
-  // R: Index + middle crossed/close
-  if (indexUp && middleUp && !ringUp && !pinkyUp &&
-    norm(indexMiddle) < 0.06 && indexTip.x > middleTip.x - palmSize * 0.05)
-    return "R";
-
-  // S: Fist, thumb over fingers
-  if (allDown && thumbTip.y < indexTip.y && norm(thumbIndex) < 0.3)
-    return "S";
-
-  // T: Thumb between index and middle
-  if (allDown && thumbTip.x > indexMcp.x && thumbTip.x < middleMcp.x &&
-    thumbTip.y < indexTip.y)
-    return "T";
-
-  // U: Index + middle up, together
-  if (indexUp && middleUp && !ringUp && !pinkyUp && norm(indexMiddle) < 0.12)
-    return "U";
-
-  // V: Index + middle up, spread apart
-  if (indexUp && middleUp && !ringUp && !pinkyUp && norm(indexMiddle) > 0.12)
-    return "V";
-
-  // W: Index + middle + ring up
-  if (indexUp && middleUp && ringUp && !pinkyUp)
-    return "W";
-
-  // X: Index slightly bent/hooked
-  if (!indexUp && !middleUp && !ringUp && !pinkyUp &&
-    indexTip.y > indexPip.y && norm(thumbIndex) > 0.2)
-    return "X";
-
-  // Y: Pinky + thumb out
-  if (!indexUp && !middleUp && !ringUp && pinkyUp && thumbUp)
-    return "Y";
-
-  // Z: Index pointing, motion-implied
-  if (indexUp && !middleUp && !ringUp && !pinkyUp && !thumbUp)
-    return "Z";
+  if (allDown && !thumbUp && norm(thumbIndex) > 0.3 && thumbTip.y < indexMcp.y) return "A";
+  if (allUp && !thumbUp && thumbTip.x > indexMcp.x && thumbTip.x < pinkyMcp.x) return "B";
+  if (!isCurled(hand, 8, 6) && !isCurled(hand, 12, 10) && !isCurled(hand, 16, 14) && !isCurled(hand, 20, 18) &&
+    norm(thumbIndex) > 0.15 && norm(thumbIndex) < 0.5 && indexTip.y > indexMcp.y - palmSize * 0.2) return "C";
+  if (indexUp && !middleUp && !ringUp && !pinkyUp && norm(thumbMiddle) < 0.2) return "D";
+  if (!indexUp && !middleUp && !ringUp && !pinkyUp && thumbTip.y > indexTip.y && norm(thumbIndex) < 0.25) return "E";
+  if (norm(thumbIndex) < 0.1 && middleUp && ringUp && pinkyUp && !indexUp) return "F";
+  if (indexUp && !middleUp && !ringUp && !pinkyUp && thumbUp && Math.abs(indexTip.x - indexMcp.x) > palmSize * 0.2) return "G";
+  if (indexUp && middleUp && !ringUp && !pinkyUp && !thumbUp && indexMiddle < palmSize * 0.25) return "H";
+  if (!indexUp && !middleUp && !ringUp && pinkyUp && !thumbUp) return "I";
+  if (!indexUp && !middleUp && !ringUp && pinkyUp && thumbUp) return "J";
+  if (indexUp && middleUp && !ringUp && !pinkyUp && thumbTip.y < hand[6].y && norm(thumbMiddle) < 0.35) return "K";
+  if (indexUp && !middleUp && !ringUp && !pinkyUp && thumbUp && Math.abs(indexTip.x - wrist.x) < palmSize * 0.4) return "L";
+  if (allDown && thumbTip.y > indexTip.y && thumbTip.y > middleTip.y && thumbTip.y > ringTip.y && thumbTip.x > indexMcp.x) return "M";
+  if (allDown && thumbTip.y > indexTip.y && thumbTip.y > middleTip.y && thumbTip.y < ringTip.y && thumbTip.x > indexMcp.x) return "N";
+  if (norm(thumbIndex) < 0.15 && norm(indexMiddle) < 0.2 && norm(middleRing) < 0.2 && norm(ringPinky) < 0.2) return "O";
+  if (indexUp && !middleUp && !ringUp && !pinkyUp && thumbUp && indexTip.y > wrist.y) return "P";
+  if (indexUp && !middleUp && !ringUp && !pinkyUp && thumbUp && thumbTip.y > thumbMcp.y && indexTip.y > indexMcp.y) return "Q";
+  if (indexUp && middleUp && !ringUp && !pinkyUp && norm(indexMiddle) < 0.06 && indexTip.x > middleTip.x - palmSize * 0.05) return "R";
+  if (allDown && thumbTip.y < indexTip.y && norm(thumbIndex) < 0.3) return "S";
+  if (allDown && thumbTip.x > indexMcp.x && thumbTip.x < middleMcp.x && thumbTip.y < indexTip.y) return "T";
+  if (indexUp && middleUp && !ringUp && !pinkyUp && norm(indexMiddle) < 0.12) return "U";
+  if (indexUp && middleUp && !ringUp && !pinkyUp && norm(indexMiddle) > 0.12) return "V";
+  if (indexUp && middleUp && ringUp && !pinkyUp) return "W";
+  if (!indexUp && !middleUp && !ringUp && !pinkyUp && indexTip.y > indexPip.y && norm(thumbIndex) > 0.2) return "X";
+  if (!indexUp && !middleUp && !ringUp && pinkyUp && thumbUp) return "Y";
+  if (indexUp && !middleUp && !ringUp && !pinkyUp && !thumbUp) return "Z";
 
   return "Unknown";
 }
 
-// ─── Gesture Smoothing & Word Builder ────────────────────────────────────────
+// ─── Gesture Smoothing ────────────────────────────────────────────────────────
 
 class GestureSmoothing {
-  buffer: string[];
+  buffer: string[] = [];
   bufferSize: number;
-  constructor(bufferSize = 15) {
-    this.buffer = [];
-    this.bufferSize = bufferSize;
-  }
+  constructor(bufferSize = 15) { this.bufferSize = bufferSize; }
   smooth(gesture: string): string {
     if (gesture === "Unknown" || gesture === "No hand detected") {
       this.buffer = [];
@@ -223,11 +100,12 @@ class GestureSmoothing {
     const counts: Record<string, number> = {};
     this.buffer.forEach(g => (counts[g] = (counts[g] || 0) + 1));
     const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
-    return top ? (top[0] as string) : gesture;
+    return top ? top[0] : gesture;
   }
 }
 
-// Common ASL words for suggestion
+// ─── Word Suggestions ─────────────────────────────────────────────────────────
+
 const WORD_SUGGESTIONS: Record<string, string[]> = {
   H: ["HELLO", "HI", "HELP", "HAND", "HAVE", "HOME"],
   T: ["THANK", "THE", "THIS", "TIME", "TODAY"],
@@ -264,68 +142,56 @@ const HAND_CONNECTIONS = [
   [0,17]
 ];
 
-function drawHandSkeleton(ctx: CanvasRenderingContext2D, landmarks: Point[], width: number, height: number, color = "#00ff88") {
+function drawHandSkeleton(
+  ctx: CanvasRenderingContext2D,
+  landmarks: Point[],
+  width: number,
+  height: number,
+  color = "#00ff88"
+) {
   ctx.clearRect(0, 0, width, height);
-
-  // Connections
   ctx.strokeStyle = color;
   ctx.lineWidth = 2;
   ctx.globalAlpha = 0.7;
   HAND_CONNECTIONS.forEach(([a, b]) => {
-    const pa = landmarks[a], pb = landmarks[b];
     ctx.beginPath();
-    ctx.moveTo(pa.x * width, pa.y * height);
-    ctx.lineTo(pb.x * width, pb.y * height);
+    ctx.moveTo(landmarks[a].x * width, landmarks[a].y * height);
+    ctx.lineTo(landmarks[b].x * width, landmarks[b].y * height);
     ctx.stroke();
   });
-
-  // Fingertip glows
   const tips = [4, 8, 12, 16, 20];
   landmarks.forEach((p, i) => {
-    const x = p.x * width, y = p.y * height;
     const isTip = tips.includes(i);
     ctx.globalAlpha = isTip ? 1 : 0.6;
     ctx.fillStyle = isTip ? "#ffffff" : color;
     ctx.beginPath();
-    ctx.arc(x, y, isTip ? 5 : 3, 0, Math.PI * 2);
+    ctx.arc(p.x * width, p.y * height, isTip ? 5 : 3, 0, Math.PI * 2);
     ctx.fill();
   });
-
   ctx.globalAlpha = 1;
 }
 
-// ─── AR Label Overlay ─────────────────────────────────────────────────────────
+// ─── AR Label ─────────────────────────────────────────────────────────────────
 
 function ARLabel({ letter, confidence }: { letter: string; confidence: number }) {
   const color = confidence > 70 ? "#00ff88" : confidence > 40 ? "#ffcc00" : "#ff6644";
   return (
     <div style={{
-      position: "absolute",
-      top: 12, left: 12,
+      position: "absolute", top: 12, left: 12,
       fontFamily: "'Space Grotesk', monospace",
       fontWeight: 800,
-      display: "flex",
-      flexDirection: "column",
-      gap: 4,
-      zIndex: 3
+      display: "flex", flexDirection: "column", gap: 4,
+      zIndex: 3,
     }}>
       <div style={{
-        fontSize: 72,
-        lineHeight: 1,
-        color,
+        fontSize: 72, lineHeight: 1, color,
         textShadow: `0 0 30px ${color}88`,
         letterSpacing: -3,
-        transition: "color 0.3s, text-shadow 0.3s"
-      }}>
-        {letter}
-      </div>
+        transition: "color 0.3s, text-shadow 0.3s",
+      }}>{letter}</div>
       <div style={{
-        fontSize: 10,
-        fontWeight: 700,
-        color: color,
-        opacity: 0.8,
-        letterSpacing: 2,
-        textTransform: "uppercase"
+        fontSize: 10, fontWeight: 700, color, opacity: 0.8,
+        letterSpacing: 2, textTransform: "uppercase",
       }}>
         {confidence > 0 ? `${confidence}% stable` : "detecting..."}
       </div>
@@ -335,9 +201,10 @@ function ARLabel({ letter, confidence }: { letter: string; confidence: number })
 
 const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
 
-// ─── Main App ─────────────────────────────────────────────────────────────────
+// ─── Main Page ────────────────────────────────────────────────────────────────
 
-export default function GesturaEnhanced() {
+export default function GesturaMain() {
+  const router = useRouter();
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -350,44 +217,47 @@ export default function GesturaEnhanced() {
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isLive, setIsLive] = useState<boolean>(false);
   const [handVisible, setHandVisible] = useState<boolean>(false);
-  const [mode, setMode] = useState<string>("translate"); // translate | guide
-  const [spaceTimer, setSpaceTimer] = useState<number>(0);
+  const [mode, setMode] = useState<"translate" | "guide">("translate");
+  const [cameraError, setCameraError] = useState<string>("");
 
-  const smootherRef = useRef<GestureSmoothing>(new GestureSmoothing(15));
-  const stableCountRef = useRef<number>(0);
-  const lastGestureRef = useRef<string>("");
-  const lastAddedRef = useRef<string>("");
-  const noHandCountRef = useRef<number>(0);
-  const spaceTimerRef = useRef<number | null>(null);
+  const smootherRef = useRef(new GestureSmoothing(15));
+  const stableCountRef = useRef(0);
+  const lastGestureRef = useRef("");
+  const noHandCountRef = useRef(0);
+  // Keep refs in sync with state for use inside the animation loop
+  const currentWordRef = useRef("");
+  const textRef = useRef("");
+
+  useEffect(() => { currentWordRef.current = currentWord; }, [currentWord]);
+  useEffect(() => { textRef.current = text; }, [text]);
 
   const speak = (t: string) => {
     if (!t) return;
     window.speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(t);
-    u.lang = "en-US";
-    u.rate = 0.9;
+    u.lang = "en-US"; u.rate = 0.9;
     window.speechSynthesis.speak(u);
   };
 
   const addLetter = useCallback((letter: string) => {
     if (!letter || letter === "Unknown" || letter === "—") return;
-    const newWord = currentWord + letter;
-    setCurrentWord(newWord);
+    setCurrentWord(prev => {
+      const newWord = prev + letter;
+      const sug = (WORD_SUGGESTIONS[letter] || []).filter(w => w.startsWith(newWord.slice(0, 3)));
+      setSuggestions(sug.slice(0, 3));
+      return newWord;
+    });
     setText(prev => prev + letter);
-
-    const sug = (WORD_SUGGESTIONS[letter] || []).filter(w => w.startsWith(newWord.slice(0, 3)));
-    setSuggestions(sug.slice(0, 3));
-    lastAddedRef.current = letter;
-  }, [currentWord]);
+  }, []);
 
   const addSpace = useCallback(() => {
-    if (currentWord) {
-      setWords(prev => [...prev, currentWord]);
-    }
-    setCurrentWord("");
+    setCurrentWord(prev => {
+      if (prev) setWords(w => [...w, prev]);
+      return "";
+    });
     setText(prev => prev + " ");
     setSuggestions([]);
-  }, [currentWord]);
+  }, []);
 
   const applyWord = (word: string) => {
     const toRemove = currentWord.length;
@@ -398,23 +268,23 @@ export default function GesturaEnhanced() {
   };
 
   const handleDelete = () => {
-    if (text.length === 0) return;
-    const last = text[text.length - 1];
-    setText(prev => prev.slice(0, -1));
-    if (last === " ") {
-      setWords(prev => prev.slice(0, -1));
-    } else {
-      setCurrentWord(prev => prev.slice(0, -1));
-    }
+    setText(prev => {
+      if (!prev.length) return prev;
+      const last = prev[prev.length - 1];
+      if (last === " ") setWords(w => w.slice(0, -1));
+      else setCurrentWord(w => w.slice(0, -1));
+      return prev.slice(0, -1);
+    });
   };
 
-  // Main vision loop
+  // ─── Vision Loop ────────────────────────────────────────────────────────────
   useEffect(() => {
     let handLandmarker: HandLandmarker | undefined;
     let animId: number | undefined;
     let stream: MediaStream | undefined;
+    let running = true;
 
-    const init = async (): Promise<void> => {
+    const init = async () => {
       try {
         const vision = await FilesetResolver.forVisionTasks(
           "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
@@ -434,77 +304,104 @@ export default function GesturaEnhanced() {
         });
 
         const video = videoRef.current;
-        if (video) {
-          video.srcObject = stream;
-          video.onloadedmetadata = () => {
-            void video.play();
+        if (!video) return;
+
+        video.srcObject = stream;
+        video.onloadedmetadata = () => {
+          video.play().then(() => {
             setIsLoading(false);
             setIsLive(true);
-            loop();
-          };
-        }
-      } catch (e) {
+            if (running) loop();
+          });
+        };
+      } catch (e: unknown) {
         console.error(e);
         setIsLoading(false);
+        if (e instanceof Error) {
+          if (e.name === "NotAllowedError") {
+            setCameraError("Camera permission denied. Please allow camera access and reload.");
+          } else if (e.name === "NotFoundError") {
+            setCameraError("No camera found on this device.");
+          } else {
+            setCameraError("Could not start camera: " + e.message);
+          }
+        }
       }
     };
 
-const loop = (): void => {
-  if (videoRef.current && canvasRef.current && handLandmarker) {
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext("2d");
+    const loop = () => {
+      if (!running) return;
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
 
-    if (!ctx) {
-      animId = requestAnimationFrame(loop);
-      return;
-    }
+      if (video && canvas && handLandmarker && video.readyState >= 2) {
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          const results = handLandmarker.detectForVideo(video, performance.now());
 
-    const results = handLandmarker.detectForVideo(
-      videoRef.current,
-      performance.now()
-    );
+          if (results.landmarks.length > 0) {
+            noHandCountRef.current = 0;
+            setHandVisible(true);
 
-    if (results.landmarks.length > 0) {
-      noHandCountRef.current = 0;
-      setHandVisible(true);
+            const raw = detectASLEnhanced(results.landmarks[0]);
+            const smoothed = smootherRef.current.smooth(raw);
 
-      const raw = detectASLEnhanced(results.landmarks[0]);
-      const smoothed = smootherRef.current.smooth(raw);
+            drawHandSkeleton(
+              ctx,
+              results.landmarks[0],
+              canvas.width,
+              canvas.height,
+              smoothed !== "Unknown" ? "#00ff88" : "#ff6644"
+            );
 
-      drawHandSkeleton(
-        ctx,
-        results.landmarks[0],
-        canvas.width,
-        canvas.height,
-        smoothed !== "Unknown" ? "#00ff88" : "#ff6644"
-      );
+            const detected = smoothed === "Unknown" ? "?" : smoothed;
+            setGesture(detected);
 
-      setGesture(smoothed === "Unknown" ? "?" : smoothed);
+            // Confidence + auto-add letter
+            if (smoothed !== "Unknown" && smoothed !== "?") {
+              if (smoothed === lastGestureRef.current) {
+                stableCountRef.current = Math.min(stableCountRef.current + 1, 45);
+              } else {
+                stableCountRef.current = 0;
+                lastGestureRef.current = smoothed;
+              }
+              const conf = Math.round((stableCountRef.current / 45) * 100);
+              setConfidence(conf);
 
-    } else {
-      noHandCountRef.current++;
-
-      if (noHandCountRef.current > 30) {
-        setHandVisible(false);
-        setGesture("—");
-        setConfidence(0);
-
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+              // Auto-add letter when held stably for ~45 frames
+              if (stableCountRef.current === 45) {
+                addLetter(smoothed);
+                stableCountRef.current = 0; // reset so it doesn't keep adding
+              }
+            } else {
+              stableCountRef.current = 0;
+              setConfidence(0);
+            }
+          } else {
+            noHandCountRef.current++;
+            if (noHandCountRef.current > 30) {
+              setHandVisible(false);
+              setGesture("—");
+              setConfidence(0);
+              stableCountRef.current = 0;
+              lastGestureRef.current = "";
+              ctx.clearRect(0, 0, canvas.width, canvas.height);
+            }
+          }
+        }
       }
-    }
-  }
 
-  animId = requestAnimationFrame(loop);
-};
+      animId = requestAnimationFrame(loop);
+    };
+
+    void init();
 
     return () => {
-  if (animId !== undefined) {
-    cancelAnimationFrame(animId);
-  }
-
-  stream?.getTracks().forEach(t => t.stop());
-};
-    }, [addLetter, addSpace]);
+      running = false;
+      if (animId !== undefined) cancelAnimationFrame(animId);
+      stream?.getTracks().forEach(t => t.stop());
+    };
+  }, [addLetter]);
 
   const cleanLetter = gesture === "Unknown" || gesture === "" ? "?" : gesture;
 
@@ -525,7 +422,6 @@ const loop = (): void => {
         @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap');
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { background: #080808; }
-        
         .btn-ghost {
           background: transparent;
           border: 1px solid rgba(255,255,255,0.12);
@@ -558,6 +454,25 @@ const loop = (): void => {
         }
         .btn-solid:hover { background: #e5e5e5; }
         .btn-solid:active { transform: scale(0.96); }
+        .btn-back {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          background: rgba(255,255,255,0.06);
+          border: 1px solid rgba(255,255,255,0.1);
+          color: rgba(255,255,255,0.7);
+          border-radius: 10px;
+          padding: 7px 12px;
+          font-size: 11px;
+          font-weight: 700;
+          letter-spacing: 1px;
+          text-transform: uppercase;
+          cursor: pointer;
+          transition: all 0.15s;
+          font-family: inherit;
+        }
+        .btn-back:hover { background: rgba(255,255,255,0.1); color: #fff; border-color: rgba(255,255,255,0.2); }
+        .btn-back:active { transform: scale(0.96); }
         .letter-key {
           height: 36px;
           display: flex;
@@ -589,11 +504,7 @@ const loop = (): void => {
           letter-spacing: 1px;
           color: #aaa;
         }
-        .suggestion-chip:hover {
-          background: rgba(255,255,255,0.1);
-          color: #fff;
-          border-color: rgba(255,255,255,0.3);
-        }
+        .suggestion-chip:hover { background: rgba(255,255,255,0.1); color: #fff; border-color: rgba(255,255,255,0.3); }
         .pulse-ring {
           position: absolute;
           inset: -4px;
@@ -648,20 +559,30 @@ const loop = (): void => {
           color: #00ff88;
           border: 1px solid rgba(0,255,136,0.3);
         }
+        @keyframes spin { to { transform: rotate(360deg); } }
       `}</style>
 
       {/* Header */}
       <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <div>
-          <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: -0.5 }}>Gestura</div>
-          <div style={{ fontSize: 10, color: "#555", letterSpacing: 2, textTransform: "uppercase", marginTop: 2 }}>ASL Translator</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          {/* ← Back button */}
+          <button className="btn-back" onClick={() => router.push("/")}>
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <path d="M8 1L3 6L8 11" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+            Back
+          </button>
+          <div>
+            <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: -0.5 }}>Gestura</div>
+            <div style={{ fontSize: 10, color: "#555", letterSpacing: 2, textTransform: "uppercase", marginTop: 1 }}>ASL Translator</div>
+          </div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <div style={{
             width: 7, height: 7, borderRadius: "50%",
             background: isLive ? "#00ff88" : "#555",
             boxShadow: isLive ? "0 0 8px #00ff88" : "none",
-            transition: "all 0.3s"
+            transition: "all 0.3s",
           }} />
           <span style={{ fontSize: 10, fontWeight: 700, color: isLive ? "#00ff88" : "#555", letterSpacing: 2, textTransform: "uppercase" }}>
             {isLoading ? "Loading" : isLive ? "Live" : "Offline"}
@@ -671,88 +592,119 @@ const loop = (): void => {
 
       {/* Tabs */}
       <div style={{ display: "flex", gap: 4, background: "rgba(255,255,255,0.05)", borderRadius: 14, padding: 4 }}>
-        {["translate", "guide"].map(tab => (
+        {(["translate", "guide"] as const).map(tab => (
           <button
             key={tab}
             onClick={() => setMode(tab)}
             style={{
-              flex: 1,
-              padding: "8px",
-              borderRadius: 10,
+              flex: 1, padding: "8px", borderRadius: 10,
               border: "none",
               background: mode === tab ? "#fff" : "transparent",
               color: mode === tab ? "#000" : "#666",
-              fontSize: 12,
-              fontWeight: 700,
-              cursor: "pointer",
-              textTransform: "uppercase",
-              letterSpacing: 1,
-              transition: "all 0.2s",
-              fontFamily: "inherit"
+              fontSize: 12, fontWeight: 700, cursor: "pointer",
+              textTransform: "uppercase", letterSpacing: 1,
+              transition: "all 0.2s", fontFamily: "inherit",
             }}
-          >
-            {tab}
-          </button>
+          >{tab}</button>
         ))}
       </div>
 
       {mode === "translate" ? (
         <>
-          {/* Camera viewport */}
-          <div style={{ position: "relative", width: "100%", aspectRatio: "1", background: "#000", borderRadius: 28, overflow: "hidden", border: "1px solid rgba(255,255,255,0.08)" }}>
+          {/* Camera Viewport */}
+          <div style={{
+            position: "relative", width: "100%", aspectRatio: "1",
+            background: "#000", borderRadius: 28, overflow: "hidden",
+            border: "1px solid rgba(255,255,255,0.08)",
+          }}>
             {isLoading && (
-              <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "#000", zIndex: 10, flexDirection: "column", gap: 12 }}>
-                <div style={{ width: 36, height: 36, border: "2px solid rgba(255,255,255,0.1)", borderTop: "2px solid #00ff88", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
-                <span style={{ fontSize: 11, letterSpacing: 2, color: "#555", textTransform: "uppercase" }}>Loading Vision</span>
+              <div style={{
+                position: "absolute", inset: 0,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                background: "#000", zIndex: 10, flexDirection: "column", gap: 12,
+              }}>
+                <div style={{
+                  width: 36, height: 36,
+                  border: "2px solid rgba(255,255,255,0.1)",
+                  borderTop: "2px solid #00ff88",
+                  borderRadius: "50%",
+                  animation: "spin 1s linear infinite",
+                }} />
+                <span style={{ fontSize: 11, letterSpacing: 2, color: "#555", textTransform: "uppercase" }}>
+                  Loading Vision
+                </span>
               </div>
             )}
 
-            <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+            {cameraError && (
+              <div style={{
+                position: "absolute", inset: 0,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                background: "#0a0a0a", zIndex: 10, flexDirection: "column", gap: 12,
+                padding: 24, textAlign: "center",
+              }}>
+                <div style={{ fontSize: 32 }}>📷</div>
+                <span style={{ fontSize: 12, color: "#ff6644", lineHeight: 1.6 }}>{cameraError}</span>
+              </div>
+            )}
 
-            <video ref={videoRef} style={{ width: "100%", height: "100%", objectFit: "cover", transform: "scaleX(-1)" }} playsInline muted />
-            <canvas ref={canvasRef} width={640} height={640} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", transform: "scaleX(-1)", pointerEvents: "none", zIndex: 1 }} />
+            <video
+              ref={videoRef}
+              style={{ width: "100%", height: "100%", objectFit: "cover", transform: "scaleX(-1)" }}
+              playsInline
+              muted
+            />
+            <canvas
+              ref={canvasRef}
+              width={640}
+              height={640}
+              style={{
+                position: "absolute", inset: 0,
+                width: "100%", height: "100%",
+                transform: "scaleX(-1)",
+                pointerEvents: "none", zIndex: 1,
+              }}
+            />
 
             {isLive && <div className="scan-line" />}
             {handVisible && <div className="pulse-ring" />}
-
-            {/* AR Letter overlay */}
             {isLive && <ARLabel letter={cleanLetter} confidence={confidence} />}
 
-            {/* Corner brackets (AR aesthetic) */}
-            {["tl","tr","bl","br"].map(c => (
+            {/* AR corner brackets */}
+            {(["tl","tr","bl","br"] as const).map(c => (
               <div key={c} style={{
-                position: "absolute",
-                width: 20, height: 20,
-                borderColor: "rgba(0,255,136,0.5)",
-                borderStyle: "solid",
-                borderWidth: 0,
+                position: "absolute", width: 20, height: 20,
+                borderColor: "rgba(0,255,136,0.5)", borderStyle: "solid", borderWidth: 0,
                 ...(c === "tl" ? { top: 12, left: 12, borderTopWidth: 2, borderLeftWidth: 2 } : {}),
                 ...(c === "tr" ? { top: 12, right: 12, borderTopWidth: 2, borderRightWidth: 2 } : {}),
                 ...(c === "bl" ? { bottom: 12, left: 12, borderBottomWidth: 2, borderLeftWidth: 2 } : {}),
                 ...(c === "br" ? { bottom: 12, right: 12, borderBottomWidth: 2, borderRightWidth: 2 } : {}),
-                zIndex: 3
+                zIndex: 3,
               }} />
             ))}
 
-            {/* Status pill */}
+            {/* Confidence pill */}
             <div style={{
               position: "absolute", bottom: 14, right: 14,
-              background: "rgba(0,0,0,0.7)",
-              backdropFilter: "blur(10px)",
-              borderRadius: 12,
-              padding: "8px 12px",
+              background: "rgba(0,0,0,0.7)", backdropFilter: "blur(10px)",
+              borderRadius: 12, padding: "8px 12px",
               border: "1px solid rgba(255,255,255,0.08)",
-              zIndex: 3,
-              minWidth: 100
+              zIndex: 3, minWidth: 100,
             }}>
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, fontWeight: 700, color: "#666", textTransform: "uppercase", letterSpacing: 1 }}>
+              <div style={{
+                display: "flex", justifyContent: "space-between",
+                fontSize: 10, fontWeight: 700, color: "#666",
+                textTransform: "uppercase", letterSpacing: 1,
+              }}>
                 <span>Stable</span>
-                <span style={{ color: confidence > 70 ? "#00ff88" : confidence > 40 ? "#ffcc00" : "#666" }}>{confidence}%</span>
+                <span style={{ color: confidence > 70 ? "#00ff88" : confidence > 40 ? "#ffcc00" : "#666" }}>
+                  {confidence}%
+                </span>
               </div>
               <div className="confidence-bar">
                 <div className="confidence-fill" style={{
                   width: `${confidence}%`,
-                  background: confidence > 70 ? "#00ff88" : confidence > 40 ? "#ffcc00" : "#ff6644"
+                  background: confidence > 70 ? "#00ff88" : confidence > 40 ? "#ffcc00" : "#ff6644",
                 }} />
               </div>
             </div>
@@ -768,19 +720,12 @@ const loop = (): void => {
           )}
 
           {/* Translation output */}
-          <div style={{
-            background: "#111",
-            borderRadius: 24,
-            padding: 20,
-            border: "1px solid rgba(255,255,255,0.07)"
-          }}>
-            <div style={{ fontSize: 10, fontWeight: 700, color: "#444", textTransform: "uppercase", letterSpacing: 2, marginBottom: 12 }}>Translation</div>
-
-            {/* Word tokens */}
+          <div style={{ background: "#111", borderRadius: 24, padding: 20, border: "1px solid rgba(255,255,255,0.07)" }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: "#444", textTransform: "uppercase", letterSpacing: 2, marginBottom: 12 }}>
+              Translation
+            </div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6, minHeight: 40, marginBottom: 16 }}>
-              {words.map((w, i) => (
-                <span key={i} className="word-token">{w}</span>
-              ))}
+              {words.map((w, i) => <span key={i} className="word-token">{w}</span>)}
               {currentWord && (
                 <span className="word-token current">{currentWord}<span style={{ opacity: 0.5 }}>_</span></span>
               )}
@@ -788,21 +733,19 @@ const loop = (): void => {
                 <span style={{ fontSize: 14, color: "#333", fontStyle: "italic" }}>Hold a sign to begin…</span>
               )}
             </div>
-
-            {/* Actions */}
             <div style={{ display: "flex", gap: 8 }}>
-              <button className="btn-solid" onClick={() => speak(text)} style={{ flex: 1 }}>
-                ▶ Speak
-              </button>
+              <button className="btn-solid" onClick={() => speak(text)} style={{ flex: 1 }}>▶ Speak</button>
               <button className="btn-ghost" onClick={addSpace}>Space</button>
               <button className="btn-ghost" onClick={handleDelete}>⌫</button>
               <button className="btn-ghost" onClick={() => { setText(""); setWords([]); setCurrentWord(""); setSuggestions([]); }}>✕</button>
             </div>
           </div>
 
-          {/* Alphabet indicator */}
+          {/* Alphabet grid */}
           <div style={{ background: "#111", borderRadius: 24, padding: 16, border: "1px solid rgba(255,255,255,0.07)" }}>
-            <div style={{ fontSize: 10, fontWeight: 700, color: "#444", textTransform: "uppercase", letterSpacing: 2, marginBottom: 10 }}>Alphabet</div>
+            <div style={{ fontSize: 10, fontWeight: 700, color: "#444", textTransform: "uppercase", letterSpacing: 2, marginBottom: 10 }}>
+              Alphabet
+            </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 5 }}>
               {LETTERS.map(l => (
                 <div key={l} className={`letter-key ${cleanLetter === l ? "active" : ""}`}>{l}</div>
@@ -811,10 +754,12 @@ const loop = (): void => {
           </div>
         </>
       ) : (
-        /* Guide mode */
+        /* Guide Mode */
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <div style={{ background: "#111", borderRadius: 24, padding: 20, border: "1px solid rgba(255,255,255,0.07)" }}>
-            <div style={{ fontSize: 10, fontWeight: 700, color: "#444", textTransform: "uppercase", letterSpacing: 2, marginBottom: 16 }}>ASL Reference</div>
+            <div style={{ fontSize: 10, fontWeight: 700, color: "#444", textTransform: "uppercase", letterSpacing: 2, marginBottom: 16 }}>
+              ASL Reference
+            </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 8 }}>
               {[
                 { l: "A", d: "Fist, thumb to side" },
@@ -833,13 +778,11 @@ const loop = (): void => {
                 { l: "W", d: "3 fingers up (idx+mid+ring)" },
               ].map(({ l, d }) => (
                 <div key={l} style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 12,
+                  display: "flex", alignItems: "center", gap: 12,
                   padding: "10px 14px",
                   background: "rgba(255,255,255,0.03)",
                   borderRadius: 14,
-                  border: "1px solid rgba(255,255,255,0.06)"
+                  border: "1px solid rgba(255,255,255,0.06)",
                 }}>
                   <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 20, fontWeight: 700, minWidth: 24, color: "#00ff88" }}>{l}</span>
                   <span style={{ fontSize: 11, color: "#666", lineHeight: 1.4 }}>{d}</span>
@@ -849,13 +792,15 @@ const loop = (): void => {
           </div>
 
           <div style={{ background: "#111", borderRadius: 24, padding: 20, border: "1px solid rgba(255,255,255,0.07)" }}>
-            <div style={{ fontSize: 10, fontWeight: 700, color: "#444", textTransform: "uppercase", letterSpacing: 2, marginBottom: 12 }}>Tips for Better Detection</div>
+            <div style={{ fontSize: 10, fontWeight: 700, color: "#444", textTransform: "uppercase", letterSpacing: 2, marginBottom: 12 }}>
+              Tips for Better Detection
+            </div>
             {[
               "Hold your hand 30–50cm from the camera",
               "Ensure good, even lighting on your hand",
-              "Hold each sign steady for ~1.5 seconds",
+              "Hold each sign steady for ~1.5 seconds until the letter is added",
               "Keep hand centered in the frame",
-              "Lower your hand briefly to add a space between letters",
+              "Lower your hand briefly between letters",
             ].map((tip, i) => (
               <div key={i} style={{ display: "flex", gap: 10, marginBottom: 8, alignItems: "flex-start" }}>
                 <span style={{ color: "#00ff88", fontSize: 11, fontWeight: 700, minWidth: 18, paddingTop: 1 }}>{i + 1}.</span>
