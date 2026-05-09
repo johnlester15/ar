@@ -1,20 +1,22 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+
+type Point = { x: number; y: number; z?: number };
 import { FilesetResolver, HandLandmarker } from "@mediapipe/tasks-vision";
 
 // ─── Enhanced ASL Detection Engine ───────────────────────────────────────────
 
-function dist(a, b) {
+function dist(a: Point, b: Point): number {
   return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2 + ((a.z || 0) - (b.z || 0)) ** 2);
 }
 
-function dist2D(a, b) {
+function dist2D(a: Point, b: Point): number {
   return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
 }
 
 // Angle between three points (degrees)
-function angle(a, b, c) {
+function angle(a: Point, b: Point, c: Point): number {
   const ab = { x: a.x - b.x, y: a.y - b.y };
   const cb = { x: c.x - b.x, y: c.y - b.y };
   const dot = ab.x * cb.x + ab.y * cb.y;
@@ -23,7 +25,7 @@ function angle(a, b, c) {
 }
 
 // Is a finger "extended" (straight up)?
-function isExtended(hand, tipIdx, pipIdx, mcpIdx) {
+function isExtended(hand: Point[], tipIdx: number, pipIdx: number, mcpIdx: number): boolean {
   const tip = hand[tipIdx];
   const pip = hand[pipIdx];
   const mcp = hand[mcpIdx];
@@ -31,19 +33,19 @@ function isExtended(hand, tipIdx, pipIdx, mcpIdx) {
 }
 
 // Is a finger "curled" (bent into palm)?
-function isCurled(hand, tipIdx, pipIdx) {
+function isCurled(hand: Point[], tipIdx: number, pipIdx: number): boolean {
   return hand[tipIdx].y > hand[pipIdx].y;
 }
 
 // Thumb extension: horizontal spread from palm
-function thumbExtended(hand) {
+function thumbExtended(hand: Point[]): boolean {
   const tip = hand[4];
   const base = hand[2];
   const wrist = hand[0];
   return dist2D(tip, wrist) > dist2D(base, wrist) * 1.3;
 }
 
-function detectASLEnhanced(hand) {
+function detectASLEnhanced(hand: Point[]): string {
   const wrist = hand[0];
   const thumbTip = hand[4], thumbIp = hand[3], thumbMcp = hand[2], thumbCmc = hand[1];
   const indexTip = hand[8], indexPip = hand[7], indexDip = hand[6], indexMcp = hand[5];
@@ -76,7 +78,7 @@ function detectASLEnhanced(hand) {
 
   // Palm size for normalization
   const palmSize = dist2D(wrist, hand[9]);
-  const norm = (d) => d / palmSize;
+  const norm = (d: number): number => d / palmSize;
 
   // ─── Letter detection (improved) ──────────────────────────────────────────
 
@@ -205,26 +207,28 @@ function detectASLEnhanced(hand) {
 // ─── Gesture Smoothing & Word Builder ────────────────────────────────────────
 
 class GestureSmoothing {
+  buffer: string[];
+  bufferSize: number;
   constructor(bufferSize = 15) {
     this.buffer = [];
     this.bufferSize = bufferSize;
   }
-  smooth(gesture) {
+  smooth(gesture: string): string {
     if (gesture === "Unknown" || gesture === "No hand detected") {
       this.buffer = [];
       return gesture;
     }
     this.buffer.push(gesture);
     if (this.buffer.length > this.bufferSize) this.buffer.shift();
-    const counts = {};
-    this.buffer.forEach(g => counts[g] = (counts[g] || 0) + 1);
+    const counts: Record<string, number> = {};
+    this.buffer.forEach(g => (counts[g] = (counts[g] || 0) + 1));
     const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
-    return top ? top[0] : gesture;
+    return top ? (top[0] as string) : gesture;
   }
 }
 
 // Common ASL words for suggestion
-const WORD_SUGGESTIONS = {
+const WORD_SUGGESTIONS: Record<string, string[]> = {
   H: ["HELLO", "HI", "HELP", "HAND", "HAVE", "HOME"],
   T: ["THANK", "THE", "THIS", "TIME", "TODAY"],
   Y: ["YOU", "YES", "YOUR"],
@@ -260,7 +264,7 @@ const HAND_CONNECTIONS = [
   [0,17]
 ];
 
-function drawHandSkeleton(ctx, landmarks, width, height, color = "#00ff88") {
+function drawHandSkeleton(ctx: CanvasRenderingContext2D, landmarks: Point[], width: number, height: number, color = "#00ff88") {
   ctx.clearRect(0, 0, width, height);
 
   // Connections
@@ -292,7 +296,7 @@ function drawHandSkeleton(ctx, landmarks, width, height, color = "#00ff88") {
 
 // ─── AR Label Overlay ─────────────────────────────────────────────────────────
 
-function ARLabel({ letter, confidence }) {
+function ARLabel({ letter, confidence }: { letter: string; confidence: number }) {
   const color = confidence > 70 ? "#00ff88" : confidence > 40 ? "#ffcc00" : "#ff6644";
   return (
     <div style={{
@@ -334,29 +338,29 @@ const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
 // ─── Main App ─────────────────────────────────────────────────────────────────
 
 export default function GesturaEnhanced() {
-  const videoRef = useRef(null);
-  const canvasRef = useRef(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  const [gesture, setGesture] = useState("—");
-  const [confidence, setConfidence] = useState(0);
-  const [text, setText] = useState("");
-  const [words, setWords] = useState([]);
-  const [currentWord, setCurrentWord] = useState("");
-  const [suggestions, setSuggestions] = useState([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [isLive, setIsLive] = useState(false);
-  const [handVisible, setHandVisible] = useState(false);
-  const [mode, setMode] = useState("translate"); // translate | guide
-  const [spaceTimer, setSpaceTimer] = useState(0);
+  const [gesture, setGesture] = useState<string>("—");
+  const [confidence, setConfidence] = useState<number>(0);
+  const [text, setText] = useState<string>("");
+  const [words, setWords] = useState<string[]>([]);
+  const [currentWord, setCurrentWord] = useState<string>("");
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isLive, setIsLive] = useState<boolean>(false);
+  const [handVisible, setHandVisible] = useState<boolean>(false);
+  const [mode, setMode] = useState<string>("translate"); // translate | guide
+  const [spaceTimer, setSpaceTimer] = useState<number>(0);
 
-  const smootherRef = useRef(new GestureSmoothing(15));
-  const stableCountRef = useRef(0);
-  const lastGestureRef = useRef("");
-  const lastAddedRef = useRef("");
-  const noHandCountRef = useRef(0);
-  const spaceTimerRef = useRef(null);
+  const smootherRef = useRef<GestureSmoothing>(new GestureSmoothing(15));
+  const stableCountRef = useRef<number>(0);
+  const lastGestureRef = useRef<string>("");
+  const lastAddedRef = useRef<string>("");
+  const noHandCountRef = useRef<number>(0);
+  const spaceTimerRef = useRef<number | null>(null);
 
-  const speak = (t) => {
+  const speak = (t: string) => {
     if (!t) return;
     window.speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(t);
@@ -365,7 +369,7 @@ export default function GesturaEnhanced() {
     window.speechSynthesis.speak(u);
   };
 
-  const addLetter = useCallback((letter) => {
+  const addLetter = useCallback((letter: string) => {
     if (!letter || letter === "Unknown" || letter === "—") return;
     const newWord = currentWord + letter;
     setCurrentWord(newWord);
@@ -385,7 +389,7 @@ export default function GesturaEnhanced() {
     setSuggestions([]);
   }, [currentWord]);
 
-  const applyWord = (word) => {
+  const applyWord = (word: string) => {
     const toRemove = currentWord.length;
     setText(prev => prev.slice(0, -toRemove) + word + " ");
     setWords(prev => [...prev, word]);
@@ -406,11 +410,11 @@ export default function GesturaEnhanced() {
 
   // Main vision loop
   useEffect(() => {
-    let handLandmarker;
-    let animId;
-    let stream;
+    let handLandmarker: HandLandmarker | undefined;
+    let animId: number | undefined;
+    let stream: MediaStream | undefined;
 
-    const init = async () => {
+    const init = async (): Promise<void> => {
       try {
         const vision = await FilesetResolver.forVisionTasks(
           "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
@@ -429,10 +433,11 @@ export default function GesturaEnhanced() {
           video: { facingMode: "user", width: 640, height: 640 },
         });
 
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          videoRef.current.onloadedmetadata = () => {
-            videoRef.current.play();
+        const video = videoRef.current;
+        if (video) {
+          video.srcObject = stream;
+          video.onloadedmetadata = () => {
+            void video.play();
             setIsLoading(false);
             setIsLive(true);
             loop();
@@ -444,7 +449,7 @@ export default function GesturaEnhanced() {
       }
     };
 
-    const loop = () => {
+    const loop = (): void => {
       if (videoRef.current && canvasRef.current && handLandmarker) {
         const canvas = canvasRef.current;
         const ctx = canvas.getContext("2d");
