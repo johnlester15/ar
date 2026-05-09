@@ -27,9 +27,9 @@ export default function Page() {
   }, [])
 
   useEffect(() => {
-    let frame
-    let start = null
-    const animate = (ts) => {
+    let frame: number
+    let start: number | null = null
+    const animate = (ts: number) => {
       if (!start) start = ts
       const elapsed = (ts - start) % 3000
       setScanLine(Math.floor((elapsed / 3000) * 100))
