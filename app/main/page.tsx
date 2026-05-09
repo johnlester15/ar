@@ -449,63 +449,62 @@ export default function GesturaEnhanced() {
       }
     };
 
-    const loop = (): void => {
-      if (videoRef.current && canvasRef.current && handLandmarker) {
-        const canvas = canvasRef.current;
-        const ctx = canvas.getContext("2d");
-        const results = handLandmarker.detectForVideo(videoRef.current, performance.now());
+const loop = (): void => {
+  if (videoRef.current && canvasRef.current && handLandmarker) {
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
 
-        if (results.landmarks.length > 0) {
-          noHandCountRef.current = 0;
-          setHandVisible(true);
-          const raw = detectASLEnhanced(results.landmarks[0]);
-          const smoothed = smootherRef.current.smooth(raw);
-
-          drawHandSkeleton(ctx, results.landmarks[0], canvas.width, canvas.height,
-            smoothed !== "Unknown" ? "#00ff88" : "#ff6644");
-
-          setGesture(smoothed === "Unknown" ? "?" : smoothed);
-
-          if (smoothed !== "Unknown") {
-            if (smoothed === lastGestureRef.current) {
-              stableCountRef.current++;
-              setConfidence(Math.min(100, Math.round((stableCountRef.current / 40) * 100)));
-            } else {
-              lastGestureRef.current = smoothed;
-              stableCountRef.current = 0;
-              setConfidence(0);
-              lastAddedRef.current = "";
-            }
-
-            if (stableCountRef.current > 40 && lastAddedRef.current !== smoothed) {
-              addLetter(smoothed);
-            }
-          }
-        } else {
-          noHandCountRef.current++;
-          if (noHandCountRef.current > 30) {
-            setHandVisible(false);
-            setGesture("—");
-            setConfidence(0);
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-          }
-
-          // Auto-add space after 1.5s no hand
-          if (noHandCountRef.current === 45 && lastAddedRef.current !== " ") {
-            lastAddedRef.current = " ";
-            addSpace();
-          }
-        }
-      }
+    if (!ctx) {
       animId = requestAnimationFrame(loop);
-    };
+      return;
+    }
 
-    init();
+    const results = handLandmarker.detectForVideo(
+      videoRef.current,
+      performance.now()
+    );
+
+    if (results.landmarks.length > 0) {
+      noHandCountRef.current = 0;
+      setHandVisible(true);
+
+      const raw = detectASLEnhanced(results.landmarks[0]);
+      const smoothed = smootherRef.current.smooth(raw);
+
+      drawHandSkeleton(
+        ctx,
+        results.landmarks[0],
+        canvas.width,
+        canvas.height,
+        smoothed !== "Unknown" ? "#00ff88" : "#ff6644"
+      );
+
+      setGesture(smoothed === "Unknown" ? "?" : smoothed);
+
+    } else {
+      noHandCountRef.current++;
+
+      if (noHandCountRef.current > 30) {
+        setHandVisible(false);
+        setGesture("—");
+        setConfidence(0);
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      }
+    }
+  }
+
+  animId = requestAnimationFrame(loop);
+};
+
     return () => {
-      cancelAnimationFrame(animId);
-      stream?.getTracks().forEach(t => t.stop());
-    };
-  }, [addLetter, addSpace]);
+  if (animId !== undefined) {
+    cancelAnimationFrame(animId);
+  }
+
+  stream?.getTracks().forEach(t => t.stop());
+};
+    }, [addLetter, addSpace]);
 
   const cleanLetter = gesture === "Unknown" || gesture === "" ? "?" : gesture;
 
