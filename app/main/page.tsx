@@ -2,770 +2,865 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { FilesetResolver, HandLandmarker } from "@mediapipe/tasks-vision";
-import { Canvas } from "@react-three/fiber";
-import { Center, OrbitControls, Text3D } from "@react-three/drei";
 
-function Letter3D({ letter }: { letter: string }) {
-  const display =
-    letter === "No hand detected" || letter === "Unknown" || letter === ""
-      ? "?"
-      : letter;
+// ─── Enhanced ASL Detection Engine ───────────────────────────────────────────
 
-  return (
-    <Canvas camera={{ position: [0, 0, 6], fov: 45 }}>
-      <ambientLight intensity={1.6} />
-      <directionalLight position={[3, 3, 4]} intensity={2.4} />
-      <Center>
-        <Text3D
-          font="/fonts/helvetiker_regular.typeface.json"
-          size={2.25}
-          height={0.35}
-          curveSegments={18}
-          bevelEnabled
-          bevelThickness={0.04}
-          bevelSize={0.04}
-        >
-          {display}
-          <meshStandardMaterial color="#111827" />
-        </Text3D>
-      </Center>
-      <OrbitControls enableZoom={false} autoRotate autoRotateSpeed={2.2} />
-    </Canvas>
-  );
+function dist(a, b) {
+  return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2 + ((a.z || 0) - (b.z || 0)) ** 2);
 }
 
-function distance(a: any, b: any) {
+function dist2D(a, b) {
   return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
 }
 
-function detectASL(hand: any[]): string {
-  const tip = (i: number) => hand[i];
-  const pip = (i: number) => hand[i - 2];
+// Angle between three points (degrees)
+function angle(a, b, c) {
+  const ab = { x: a.x - b.x, y: a.y - b.y };
+  const cb = { x: c.x - b.x, y: c.y - b.y };
+  const dot = ab.x * cb.x + ab.y * cb.y;
+  const cross = ab.x * cb.y - ab.y * cb.x;
+  return Math.abs(Math.atan2(Math.abs(cross), dot) * 180 / Math.PI);
+}
 
-  const indexUp = tip(8).y < pip(8).y;
-  const middleUp = tip(12).y < pip(12).y;
-  const ringUp = tip(16).y < pip(16).y;
-  const pinkyUp = tip(20).y < pip(20).y;
+// Is a finger "extended" (straight up)?
+function isExtended(hand, tipIdx, pipIdx, mcpIdx) {
+  const tip = hand[tipIdx];
+  const pip = hand[pipIdx];
+  const mcp = hand[mcpIdx];
+  return tip.y < pip.y && pip.y < mcp.y;
+}
 
-  const thumbTip = hand[4];
-  const thumbIp = hand[3];
-  const thumbBase = hand[2];
+// Is a finger "curled" (bent into palm)?
+function isCurled(hand, tipIdx, pipIdx) {
+  return hand[tipIdx].y > hand[pipIdx].y;
+}
 
-  const indexTip = hand[8];
-  const middleTip = hand[12];
-  const ringTip = hand[16];
-  const pinkyTip = hand[20];
+// Thumb extension: horizontal spread from palm
+function thumbExtended(hand) {
+  const tip = hand[4];
+  const base = hand[2];
+  const wrist = hand[0];
+  return dist2D(tip, wrist) > dist2D(base, wrist) * 1.3;
+}
 
-  const thumbOut = Math.abs(thumbTip.x - thumbBase.x) > 0.085;
-  const thumbIndexDist = distance(thumbTip, indexTip);
-  const thumbMiddleDist = distance(thumbTip, middleTip);
-  const indexMiddleDist = distance(indexTip, middleTip);
-  const middleRingDist = distance(middleTip, ringTip);
-  const ringPinkyDist = distance(ringTip, pinkyTip);
+function detectASLEnhanced(hand) {
+  const wrist = hand[0];
+  const thumbTip = hand[4], thumbIp = hand[3], thumbMcp = hand[2], thumbCmc = hand[1];
+  const indexTip = hand[8], indexPip = hand[7], indexDip = hand[6], indexMcp = hand[5];
+  const middleTip = hand[12], middlePip = hand[11], middleMcp = hand[10];
+  const ringTip = hand[16], ringPip = hand[15], ringMcp = hand[14];
+  const pinkyTip = hand[20], pinkyPip = hand[19], pinkyMcp = hand[18];
+
+  const indexUp = isExtended(hand, 8, 7, 5);
+  const middleUp = isExtended(hand, 12, 11, 9);
+  const ringUp = isExtended(hand, 16, 15, 13);
+  const pinkyUp = isExtended(hand, 20, 19, 17);
+  const thumbUp = thumbExtended(hand);
+
+  const indexCurled = isCurled(hand, 8, 6);
+  const middleCurled = isCurled(hand, 12, 10);
+  const ringCurled = isCurled(hand, 16, 14);
+  const pinkyCurled = isCurled(hand, 20, 18);
 
   const allDown = !indexUp && !middleUp && !ringUp && !pinkyUp;
   const allUp = indexUp && middleUp && ringUp && pinkyUp;
 
-  // F / O first because they use pinching
-  if (thumbIndexDist < 0.055 && middleUp && ringUp && pinkyUp) return "F";
+  // Key distances
+  const thumbIndex = dist2D(thumbTip, indexTip);
+  const thumbMiddle = dist2D(thumbTip, middleTip);
+  const thumbRing = dist2D(thumbTip, ringTip);
+  const thumbPinky = dist2D(thumbTip, pinkyTip);
+  const indexMiddle = dist2D(indexTip, middleTip);
+  const middleRing = dist2D(middleTip, ringTip);
+  const ringPinky = dist2D(ringTip, pinkyTip);
 
-  if (
-    thumbIndexDist < 0.08 &&
-    indexMiddleDist < 0.09 &&
-    middleRingDist < 0.1 &&
-    ringPinkyDist < 0.12
-  )
-    return "O";
+  // Palm size for normalization
+  const palmSize = dist2D(wrist, hand[9]);
+  const norm = (d) => d / palmSize;
 
-  // B, C, W
-  if (allUp && !thumbOut) return "B";
+  // ─── Letter detection (improved) ──────────────────────────────────────────
 
-  if (
-    thumbIndexDist > 0.09 &&
-    thumbIndexDist < 0.24 &&
-    indexUp &&
-    middleUp &&
-    ringUp &&
-    pinkyUp
-  )
+  // A: Fist, thumb to side (not over fingers)
+  if (allDown && !thumbUp && norm(thumbIndex) > 0.3 && thumbTip.y < indexMcp.y)
+    return "A";
+
+  // B: All four fingers up, thumb tucked across palm
+  if (allUp && !thumbUp && thumbTip.x > indexMcp.x && thumbTip.x < pinkyMcp.x)
+    return "B";
+
+  // C: Curved, all fingers bent similarly
+  if (!indexCurled && !middleCurled && !ringCurled && !pinkyCurled &&
+    norm(thumbIndex) > 0.15 && norm(thumbIndex) < 0.5 &&
+    indexTip.y > indexMcp.y - palmSize * 0.2)
     return "C";
 
-  if (indexUp && middleUp && ringUp && !pinkyUp) return "W";
+  // D: Index up, others curled, thumb touches middle
+  if (indexUp && !middleUp && !ringUp && !pinkyUp && norm(thumbMiddle) < 0.2)
+    return "D";
 
-  // U, V, R, K
-  if (indexUp && middleUp && !ringUp && !pinkyUp) {
-    if (Math.abs(indexTip.x - middleTip.x) < 0.025 && indexTip.y > middleTip.y)
-      return "R";
+  // E: All fingers bent, thumb tucked under
+  if (!indexUp && !middleUp && !ringUp && !pinkyUp &&
+    thumbTip.y > indexTip.y && norm(thumbIndex) < 0.25)
+    return "E";
 
-    if (thumbTip.y < hand[6].y && thumbMiddleDist > 0.08) return "K";
+  // F: Index+thumb touch, others up
+  if (norm(thumbIndex) < 0.1 && middleUp && ringUp && pinkyUp && !indexUp)
+    return "F";
 
-    if (indexMiddleDist < 0.065) return "U";
+  // G: Index points sideways, thumb parallel
+  if (indexUp && !middleUp && !ringUp && !pinkyUp && thumbUp &&
+    Math.abs(indexTip.x - indexMcp.x) > palmSize * 0.2)
+    return "G";
 
-    return "V";
-  }
-
-  // D, G, L, Z
-  if (indexUp && !middleUp && !ringUp && !pinkyUp) {
-    if (thumbMiddleDist < 0.11) return "D";
-    if (thumbOut && Math.abs(indexTip.y - hand[5].y) < 0.16) return "G";
-    if (thumbOut) return "L";
-    return "Z";
-  }
-
-  // I, J, Y
-  if (!indexUp && !middleUp && !ringUp && pinkyUp) {
-    if (thumbOut) return "Y";
-    return "I";
-  }
-
-  // A, E, M, N, S, T, X
-  if (allDown) {
-    if (indexTip.y < hand[6].y) return "X";
-
-    if (thumbTip.x > hand[5].x && thumbTip.x < hand[9].x) return "T";
-
-    if (thumbTip.y > hand[10].y && thumbTip.y < hand[14].y) return "M";
-
-    if (thumbTip.y > hand[6].y && thumbTip.y < hand[10].y) return "N";
-
-    if (thumbTip.y < thumbIp.y) return "A";
-
-    if (thumbTip.y > thumbIp.y) return "E";
-
-    if (!thumbOut) return "S";
-  }
-
-  // H
-  if (
-    indexUp &&
-    middleUp &&
-    !ringUp &&
-    !pinkyUp &&
-    indexMiddleDist < 0.075
-  )
+  // H: Index + middle extended sideways
+  if (indexUp && middleUp && !ringUp && !pinkyUp && !thumbUp &&
+    indexMiddle < palmSize * 0.25)
     return "H";
 
-  // P / Q approximations
-  if (allDown && thumbOut && thumbTip.y > thumbIp.y) return "Q";
-  if (allDown && thumbOut) return "P";
+  // I: Only pinky up
+  if (!indexUp && !middleUp && !ringUp && pinkyUp && !thumbUp)
+    return "I";
+
+  // J: Only pinky up + thumb out (J involves motion but this is static approximation)
+  if (!indexUp && !middleUp && !ringUp && pinkyUp && thumbUp)
+    return "J";
+
+  // K: Index + middle up, thumb between them
+  if (indexUp && middleUp && !ringUp && !pinkyUp &&
+    thumbTip.y < hand[6].y && norm(thumbMiddle) < 0.35)
+    return "K";
+
+  // L: Index up + thumb out (L-shape)
+  if (indexUp && !middleUp && !ringUp && !pinkyUp && thumbUp &&
+    Math.abs(indexTip.x - wrist.x) < palmSize * 0.4)
+    return "L";
+
+  // M: Thumb under index+middle+ring (3 fingers over thumb)
+  if (allDown && thumbTip.y > indexTip.y && thumbTip.y > middleTip.y && thumbTip.y > ringTip.y &&
+    thumbTip.x > indexMcp.x)
+    return "M";
+
+  // N: Thumb under index+middle
+  if (allDown && thumbTip.y > indexTip.y && thumbTip.y > middleTip.y &&
+    thumbTip.y < ringTip.y && thumbTip.x > indexMcp.x)
+    return "N";
+
+  // O: All fingers curved to touch thumb
+  if (norm(thumbIndex) < 0.15 && norm(indexMiddle) < 0.2 &&
+    norm(middleRing) < 0.2 && norm(ringPinky) < 0.2)
+    return "O";
+
+  // P: Index pointing down, thumb out
+  if (indexUp && !middleUp && !ringUp && !pinkyUp && thumbUp &&
+    indexTip.y > wrist.y)
+    return "P";
+
+  // Q: Index + thumb pointing down
+  if (indexUp && !middleUp && !ringUp && !pinkyUp && thumbUp &&
+    thumbTip.y > thumbMcp.y && indexTip.y > indexMcp.y)
+    return "Q";
+
+  // R: Index + middle crossed/close
+  if (indexUp && middleUp && !ringUp && !pinkyUp &&
+    norm(indexMiddle) < 0.06 && indexTip.x > middleTip.x - palmSize * 0.05)
+    return "R";
+
+  // S: Fist, thumb over fingers
+  if (allDown && thumbTip.y < indexTip.y && norm(thumbIndex) < 0.3)
+    return "S";
+
+  // T: Thumb between index and middle
+  if (allDown && thumbTip.x > indexMcp.x && thumbTip.x < middleMcp.x &&
+    thumbTip.y < indexTip.y)
+    return "T";
+
+  // U: Index + middle up, together
+  if (indexUp && middleUp && !ringUp && !pinkyUp && norm(indexMiddle) < 0.12)
+    return "U";
+
+  // V: Index + middle up, spread apart
+  if (indexUp && middleUp && !ringUp && !pinkyUp && norm(indexMiddle) > 0.12)
+    return "V";
+
+  // W: Index + middle + ring up
+  if (indexUp && middleUp && ringUp && !pinkyUp)
+    return "W";
+
+  // X: Index slightly bent/hooked
+  if (!indexUp && !middleUp && !ringUp && !pinkyUp &&
+    indexTip.y > indexPip.y && norm(thumbIndex) > 0.2)
+    return "X";
+
+  // Y: Pinky + thumb out
+  if (!indexUp && !middleUp && !ringUp && pinkyUp && thumbUp)
+    return "Y";
+
+  // Z: Index pointing, motion-implied
+  if (indexUp && !middleUp && !ringUp && !pinkyUp && !thumbUp)
+    return "Z";
 
   return "Unknown";
 }
 
-const ASL_GUIDE = [
-  "A",
-  "B",
-  "C",
-  "D",
-  "E",
-  "F",
-  "G",
-  "H",
-  "I",
-  "J",
-  "K",
-  "L",
-  "M",
-  "N",
-  "O",
-  "P",
-  "Q",
-  "R",
-  "S",
-  "T",
-  "U",
-  "V",
-  "W",
-  "X",
-  "Y",
-  "Z",
+// ─── Gesture Smoothing & Word Builder ────────────────────────────────────────
+
+class GestureSmoothing {
+  constructor(bufferSize = 15) {
+    this.buffer = [];
+    this.bufferSize = bufferSize;
+  }
+  smooth(gesture) {
+    if (gesture === "Unknown" || gesture === "No hand detected") {
+      this.buffer = [];
+      return gesture;
+    }
+    this.buffer.push(gesture);
+    if (this.buffer.length > this.bufferSize) this.buffer.shift();
+    const counts = {};
+    this.buffer.forEach(g => counts[g] = (counts[g] || 0) + 1);
+    const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+    return top ? top[0] : gesture;
+  }
+}
+
+// Common ASL words for suggestion
+const WORD_SUGGESTIONS = {
+  H: ["HELLO", "HI", "HELP", "HAND", "HAVE", "HOME"],
+  T: ["THANK", "THE", "THIS", "TIME", "TODAY"],
+  Y: ["YOU", "YES", "YOUR"],
+  N: ["NO", "NAME", "NEED", "NOW"],
+  G: ["GOOD", "GO", "GET", "GREAT"],
+  W: ["WHAT", "WHERE", "WHEN", "WHO", "WHY", "WANT"],
+  P: ["PLEASE", "PEOPLE"],
+  L: ["LOVE", "LIKE", "LEARN"],
+  S: ["SORRY", "SEE", "SAY"],
+  M: ["MY", "ME", "MAYBE", "MORE"],
+  I: ["I", "IS"],
+  A: ["AND", "ARE", "ASK"],
+  D: ["DO", "DONE", "DAY"],
+  C: ["CAN", "COME", "CALL"],
+  B: ["BUT", "BE", "BECAUSE"],
+  F: ["FOR", "FEEL", "FROM", "FINE"],
+  E: ["EVERYONE"],
+  K: ["KNOW"],
+  O: ["OK"],
+  R: ["RIGHT", "REALLY"],
+  U: ["UNDERSTAND"],
+  V: ["VERY"],
+};
+
+// ─── Skeleton Renderer ────────────────────────────────────────────────────────
+
+const HAND_CONNECTIONS = [
+  [0,1],[1,2],[2,3],[3,4],
+  [0,5],[5,6],[6,7],[7,8],
+  [5,9],[9,10],[10,11],[11,12],
+  [9,13],[13,14],[14,15],[15,16],
+  [13,17],[17,18],[18,19],[19,20],
+  [0,17]
 ];
 
-export default function Gestura() {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+function drawHandSkeleton(ctx, landmarks, width, height, color = "#00ff88") {
+  ctx.clearRect(0, 0, width, height);
 
-  const [currentGesture, setCurrentGesture] = useState("No hand detected");
-  const [detectedText, setDetectedText] = useState("");
+  // Connections
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.globalAlpha = 0.7;
+  HAND_CONNECTIONS.forEach(([a, b]) => {
+    const pa = landmarks[a], pb = landmarks[b];
+    ctx.beginPath();
+    ctx.moveTo(pa.x * width, pa.y * height);
+    ctx.lineTo(pb.x * width, pb.y * height);
+    ctx.stroke();
+  });
+
+  // Fingertip glows
+  const tips = [4, 8, 12, 16, 20];
+  landmarks.forEach((p, i) => {
+    const x = p.x * width, y = p.y * height;
+    const isTip = tips.includes(i);
+    ctx.globalAlpha = isTip ? 1 : 0.6;
+    ctx.fillStyle = isTip ? "#ffffff" : color;
+    ctx.beginPath();
+    ctx.arc(x, y, isTip ? 5 : 3, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  ctx.globalAlpha = 1;
+}
+
+// ─── AR Label Overlay ─────────────────────────────────────────────────────────
+
+function ARLabel({ letter, confidence }) {
+  const color = confidence > 70 ? "#00ff88" : confidence > 40 ? "#ffcc00" : "#ff6644";
+  return (
+    <div style={{
+      position: "absolute",
+      top: 12, left: 12,
+      fontFamily: "'Space Grotesk', monospace",
+      fontWeight: 800,
+      display: "flex",
+      flexDirection: "column",
+      gap: 4,
+      zIndex: 3
+    }}>
+      <div style={{
+        fontSize: 72,
+        lineHeight: 1,
+        color,
+        textShadow: `0 0 30px ${color}88`,
+        letterSpacing: -3,
+        transition: "color 0.3s, text-shadow 0.3s"
+      }}>
+        {letter}
+      </div>
+      <div style={{
+        fontSize: 10,
+        fontWeight: 700,
+        color: color,
+        opacity: 0.8,
+        letterSpacing: 2,
+        textTransform: "uppercase"
+      }}>
+        {confidence > 0 ? `${confidence}% stable` : "detecting..."}
+      </div>
+    </div>
+  );
+}
+
+const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
+
+// ─── Main App ─────────────────────────────────────────────────────────────────
+
+export default function GesturaEnhanced() {
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+
+  const [gesture, setGesture] = useState("—");
   const [confidence, setConfidence] = useState(0);
+  const [text, setText] = useState("");
+  const [words, setWords] = useState([]);
+  const [currentWord, setCurrentWord] = useState("");
+  const [suggestions, setSuggestions] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isLive, setIsLive] = useState(false);
+  const [handVisible, setHandVisible] = useState(false);
+  const [mode, setMode] = useState("translate"); // translate | guide
+  const [spaceTimer, setSpaceTimer] = useState(0);
 
-  const lastGestureRef = useRef("");
+  const smootherRef = useRef(new GestureSmoothing(15));
   const stableCountRef = useRef(0);
+  const lastGestureRef = useRef("");
   const lastAddedRef = useRef("");
-  const gestureBufferRef = useRef<string[]>([]);
+  const noHandCountRef = useRef(0);
+  const spaceTimerRef = useRef(null);
 
-  const smoothGesture = (gesture: string) => {
-    if (gesture === "Unknown" || gesture === "No hand detected") return gesture;
-
-    gestureBufferRef.current.push(gesture);
-    if (gestureBufferRef.current.length > 12) {
-      gestureBufferRef.current.shift();
-    }
-
-    const count: Record<string, number> = {};
-    gestureBufferRef.current.forEach((g) => {
-      count[g] = (count[g] || 0) + 1;
-    });
-
-    return Object.keys(count).reduce((a, b) => (count[a] > count[b] ? a : b));
+  const speak = (t) => {
+    if (!t) return;
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(t);
+    u.lang = "en-US";
+    u.rate = 0.9;
+    window.speechSynthesis.speak(u);
   };
 
-  const addStableGesture = useCallback((gesture: string) => {
-    if (gesture === "Unknown" || gesture === "No hand detected") return;
+  const addLetter = useCallback((letter) => {
+    if (!letter || letter === "Unknown" || letter === "—") return;
+    const newWord = currentWord + letter;
+    setCurrentWord(newWord);
+    setText(prev => prev + letter);
 
-    if (gesture === lastGestureRef.current) {
-      stableCountRef.current += 1;
-      setConfidence(
-        Math.min(100, Math.round((stableCountRef.current / 45) * 100))
-      );
+    const sug = (WORD_SUGGESTIONS[letter] || []).filter(w => w.startsWith(newWord.slice(0, 3)));
+    setSuggestions(sug.slice(0, 3));
+    lastAddedRef.current = letter;
+  }, [currentWord]);
+
+  const addSpace = useCallback(() => {
+    if (currentWord) {
+      setWords(prev => [...prev, currentWord]);
+    }
+    setCurrentWord("");
+    setText(prev => prev + " ");
+    setSuggestions([]);
+  }, [currentWord]);
+
+  const applyWord = (word) => {
+    const toRemove = currentWord.length;
+    setText(prev => prev.slice(0, -toRemove) + word + " ");
+    setWords(prev => [...prev, word]);
+    setCurrentWord("");
+    setSuggestions([]);
+  };
+
+  const handleDelete = () => {
+    if (text.length === 0) return;
+    const last = text[text.length - 1];
+    setText(prev => prev.slice(0, -1));
+    if (last === " ") {
+      setWords(prev => prev.slice(0, -1));
     } else {
-      lastGestureRef.current = gesture;
-      stableCountRef.current = 0;
-      setConfidence(0);
+      setCurrentWord(prev => prev.slice(0, -1));
     }
-
-    if (stableCountRef.current > 45 && lastAddedRef.current !== gesture) {
-      lastAddedRef.current = gesture;
-      setDetectedText((prev) => (prev ? `${prev}${gesture}` : gesture));
-    }
-  }, []);
-
-  const speakText = () => {
-    if (!detectedText) return;
-    const utterance = new SpeechSynthesisUtterance(detectedText);
-    utterance.lang = "en-US";
-    speechSynthesis.speak(utterance);
   };
 
-  const clearText = () => {
-    setDetectedText("");
-    lastGestureRef.current = "";
-    lastAddedRef.current = "";
-    stableCountRef.current = 0;
-    gestureBufferRef.current = [];
-    setConfidence(0);
-  };
-
-  const deleteChar = () => {
-    setDetectedText((prev) => prev.slice(0, -1));
-  };
-
+  // Main vision loop
   useEffect(() => {
-    let handLandmarker: HandLandmarker;
-    let animationId = 0;
-    let stream: MediaStream | undefined;
-    let isMounted = true;
+    let handLandmarker;
+    let animId;
+    let stream;
 
-    const start = async () => {
+    const init = async () => {
       try {
-        const video = videoRef.current;
-        const canvas = canvasRef.current;
-        if (!video || !canvas) return;
-
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: "user",
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-          },
-        });
-
-        video.srcObject = stream;
-        await video.play();
-
         const vision = await FilesetResolver.forVisionTasks(
           "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
         );
-
         handLandmarker = await HandLandmarker.createFromOptions(vision, {
           baseOptions: {
             modelAssetPath:
               "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
-            delegate: "CPU",
+            delegate: "GPU",
           },
           runningMode: "VIDEO",
           numHands: 1,
         });
 
-        if (!isMounted) return;
-        setIsLoading(false);
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "user", width: 640, height: 640 },
+        });
 
-        const ctx = canvas.getContext("2d");
-        if (!ctx) return;
-
-        const connections = [
-          [0, 1],
-          [1, 2],
-          [2, 3],
-          [3, 4],
-          [0, 5],
-          [5, 6],
-          [6, 7],
-          [7, 8],
-          [5, 9],
-          [9, 10],
-          [10, 11],
-          [11, 12],
-          [9, 13],
-          [13, 14],
-          [14, 15],
-          [15, 16],
-          [13, 17],
-          [17, 18],
-          [18, 19],
-          [19, 20],
-          [0, 17],
-        ];
-
-        const detect = () => {
-          if (!video || !canvas || !handLandmarker) return;
-
-          canvas.width = video.videoWidth;
-          canvas.height = video.videoHeight;
-
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-          let gesture = "No hand detected";
-
-          if (video.readyState >= 2) {
-            const results = handLandmarker.detectForVideo(
-              video,
-              performance.now()
-            );
-
-            if (results.landmarks.length > 0) {
-              const hand = results.landmarks[0];
-              const rawGesture = detectASL(hand);
-              gesture = smoothGesture(rawGesture);
-
-              ctx.lineWidth = 2;
-              ctx.strokeStyle = "rgba(17, 24, 39, 0.75)";
-
-              connections.forEach(([a, b]) => {
-                ctx.beginPath();
-                ctx.moveTo(
-                  hand[a].x * canvas.width,
-                  hand[a].y * canvas.height
-                );
-                ctx.lineTo(
-                  hand[b].x * canvas.width,
-                  hand[b].y * canvas.height
-                );
-                ctx.stroke();
-              });
-
-              hand.forEach((point, index) => {
-                ctx.beginPath();
-                ctx.arc(
-                  point.x * canvas.width,
-                  point.y * canvas.height,
-                  index === 0 ? 7 : 5,
-                  0,
-                  Math.PI * 2
-                );
-                ctx.fillStyle = index === 0 ? "#111827" : "#fff8e8";
-                ctx.fill();
-                ctx.strokeStyle = "#111827";
-                ctx.lineWidth = 1.5;
-                ctx.stroke();
-              });
-            } else {
-              gestureBufferRef.current = [];
-              setConfidence(0);
-            }
-          }
-
-          setCurrentGesture(gesture);
-          addStableGesture(gesture);
-
-          animationId = requestAnimationFrame(detect);
-        };
-
-        detect();
-      } catch (error) {
-        console.error("Camera or MediaPipe failed:", error);
-        setCurrentGesture("Camera error");
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.onloadedmetadata = () => {
+            videoRef.current.play();
+            setIsLoading(false);
+            setIsLive(true);
+            loop();
+          };
+        }
+      } catch (e) {
+        console.error(e);
         setIsLoading(false);
       }
     };
 
-    start();
+    const loop = () => {
+      if (videoRef.current && canvasRef.current && handLandmarker) {
+        const canvas = canvasRef.current;
+        const ctx = canvas.getContext("2d");
+        const results = handLandmarker.detectForVideo(videoRef.current, performance.now());
 
-    return () => {
-      isMounted = false;
-      cancelAnimationFrame(animationId);
-      stream?.getTracks().forEach((track) => track.stop());
+        if (results.landmarks.length > 0) {
+          noHandCountRef.current = 0;
+          setHandVisible(true);
+          const raw = detectASLEnhanced(results.landmarks[0]);
+          const smoothed = smootherRef.current.smooth(raw);
+
+          drawHandSkeleton(ctx, results.landmarks[0], canvas.width, canvas.height,
+            smoothed !== "Unknown" ? "#00ff88" : "#ff6644");
+
+          setGesture(smoothed === "Unknown" ? "?" : smoothed);
+
+          if (smoothed !== "Unknown") {
+            if (smoothed === lastGestureRef.current) {
+              stableCountRef.current++;
+              setConfidence(Math.min(100, Math.round((stableCountRef.current / 40) * 100)));
+            } else {
+              lastGestureRef.current = smoothed;
+              stableCountRef.current = 0;
+              setConfidence(0);
+              lastAddedRef.current = "";
+            }
+
+            if (stableCountRef.current > 40 && lastAddedRef.current !== smoothed) {
+              addLetter(smoothed);
+            }
+          }
+        } else {
+          noHandCountRef.current++;
+          if (noHandCountRef.current > 30) {
+            setHandVisible(false);
+            setGesture("—");
+            setConfidence(0);
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+          }
+
+          // Auto-add space after 1.5s no hand
+          if (noHandCountRef.current === 45 && lastAddedRef.current !== " ") {
+            lastAddedRef.current = " ";
+            addSpace();
+          }
+        }
+      }
+      animId = requestAnimationFrame(loop);
     };
-  }, [addStableGesture]);
 
-  const cleanGesture =
-    currentGesture === "No hand detected" ||
-    currentGesture === "Unknown" ||
-    currentGesture === "Camera error"
-      ? "?"
-      : currentGesture;
+    init();
+    return () => {
+      cancelAnimationFrame(animId);
+      stream?.getTracks().forEach(t => t.stop());
+    };
+  }, [addLetter, addSpace]);
+
+  const cleanLetter = gesture === "Unknown" || gesture === "" ? "?" : gesture;
 
   return (
-    <main className="app">
-      <section className="hero">
-        <div>
-          <p className="label">Sign Language Alphabet</p>
-          <h1>Gestura</h1>
-          <p className="sub">Minimal ASL-based AR translator</p>
-        </div>
-
-        <span className={`status ${isLoading ? "loading" : ""}`}>
-          {isLoading ? "Loading" : "Live"}
-        </span>
-      </section>
-
-      <section className="cameraCard">
-        <canvas ref={canvasRef} className="camera" />
-        <video ref={videoRef} style={{ display: "none" }} />
-
-        {isLoading && <div className="loadingBox">Initializing camera…</div>}
-
-        <div className="letterBubble">
-          <Letter3D letter={cleanGesture} />
-        </div>
-
-        <div className="detectedPill">
-          <div>
-            <span>Detected letter</span>
-            <strong>{cleanGesture}</strong>
-          </div>
-          <div className="miniConfidence">
-            <b>{confidence}%</b>
-            <i>
-              <em style={{ width: `${confidence}%` }} />
-            </i>
-          </div>
-        </div>
-      </section>
-
-      <section className="outputCard">
-        <div className="outputTop">
-          <div>
-            <span className="small">Translated Text</span>
-            <h2>{detectedText || "—"}</h2>
-          </div>
-        </div>
-
-        <div className="actions">
-          <button onClick={speakText}>Speak</button>
-          <button onClick={deleteChar}>Delete</button>
-          <button onClick={clearText}>Clear</button>
-        </div>
-      </section>
-
-      <section className="guide">
-        <div className="guideTitle">
-          <h3>ASL Alphabet</h3>
-          <p>Based on the reference chart</p>
-        </div>
-
-        <div className="chips">
-          {ASL_GUIDE.map((letter) => (
-            <span
-              key={letter}
-              className={cleanGesture === letter ? "active" : ""}
-            >
-              {letter}
-            </span>
-          ))}
-        </div>
-
-        <p className="note">
-          J and Z are movement-based signs, so this prototype approximates them
-          using static hand posture. For 90%+ accuracy, use a trained ML model.
-        </p>
-      </section>
-
-      <style jsx>{`
-        * {
-          box-sizing: border-box;
-        }
-
-        .app {
-          min-height: 100vh;
-          padding: 14px;
-          background: #f7ead0;
-          color: #111827;
-          font-family: Arial, sans-serif;
-        }
-
-        .hero {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          gap: 12px;
-          margin-bottom: 14px;
-        }
-
-        .label {
-          margin: 0;
-          text-transform: uppercase;
-          letter-spacing: 0.24em;
-          font-size: 10px;
-          font-weight: 900;
-        }
-
-        h1 {
-          margin: 2px 0;
-          font-family: Georgia, serif;
-          font-size: 44px;
-          line-height: 1;
-        }
-
-        .sub {
-          margin: 0;
-          color: #6b7280;
-          font-size: 13px;
-        }
-
-        .status {
-          padding: 8px 14px;
-          border-radius: 999px;
-          background: #111827;
-          color: #f7ead0;
-          font-size: 13px;
-          font-weight: 800;
-        }
-
-        .status.loading {
-          opacity: 0.55;
-        }
-
-        .cameraCard {
-          position: relative;
-          overflow: hidden;
-          border: 2px solid #111827;
-          border-radius: 30px;
-          background: #111827;
-          box-shadow: 0 18px 35px rgba(17, 24, 39, 0.18);
-        }
-
-        .camera {
-          width: 100%;
-          display: block;
-          aspect-ratio: 3 / 4;
-          object-fit: cover;
-        }
-
-        .loadingBox {
-          position: absolute;
-          inset: 0;
-          display: grid;
-          place-items: center;
-          background: rgba(247, 234, 208, 0.92);
-          font-weight: 900;
-        }
-
-        .letterBubble {
-          position: absolute;
-          top: 14px;
-          right: 14px;
-          width: 118px;
-          height: 118px;
-          border-radius: 26px;
-          background: rgba(247, 234, 208, 0.92);
-          border: 2px solid #111827;
-          overflow: hidden;
-          box-shadow: 0 10px 20px rgba(17, 24, 39, 0.18);
-        }
-
-        .detectedPill {
-          position: absolute;
-          left: 14px;
-          right: 14px;
-          bottom: 14px;
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          gap: 12px;
-          padding: 12px 14px;
-          border-radius: 22px;
-          background: rgba(247, 234, 208, 0.94);
-          border: 2px solid #111827;
-        }
-
-        .detectedPill span {
-          display: block;
-          color: #6b7280;
-          font-size: 12px;
-          font-weight: 800;
-          text-transform: uppercase;
-          letter-spacing: 0.08em;
-        }
-
-        .detectedPill strong {
-          display: block;
-          font-size: 34px;
-          line-height: 1;
-        }
-
-        .miniConfidence {
-          width: 92px;
-          text-align: right;
-          font-weight: 900;
-        }
-
-        .miniConfidence i {
-          display: block;
-          height: 8px;
-          margin-top: 6px;
-          border-radius: 999px;
-          background: #eadfca;
-          overflow: hidden;
-        }
-
-        .miniConfidence em {
-          display: block;
-          height: 100%;
-          background: #111827;
-          border-radius: 999px;
-        }
-
-        .outputCard,
-        .guide {
-          margin-top: 14px;
-          padding: 16px;
-          border: 2px solid #111827;
-          border-radius: 26px;
-          background: #fff8e8;
-          box-shadow: 0 12px 24px rgba(17, 24, 39, 0.08);
-        }
-
-        .small {
-          color: #6b7280;
-          font-size: 12px;
-          font-weight: 900;
-          text-transform: uppercase;
-          letter-spacing: 0.08em;
-        }
-
-        h2 {
-          min-height: 48px;
-          margin: 6px 0 0;
-          font-size: 32px;
-          word-break: break-all;
-          letter-spacing: 0.06em;
-        }
-
-        .actions {
-          display: grid;
-          grid-template-columns: repeat(3, 1fr);
-          gap: 10px;
-          margin-top: 14px;
-        }
-
-        button {
-          padding: 13px 10px;
-          border-radius: 16px;
-          border: 2px solid #111827;
-          background: #111827;
-          color: #f7ead0;
-          font-weight: 900;
-          cursor: pointer;
-        }
-
-        button:nth-child(2),
-        button:nth-child(3) {
+    <main style={{
+      minHeight: "100vh",
+      background: "#080808",
+      color: "#fff",
+      fontFamily: "'Space Grotesk', 'DM Sans', system-ui, sans-serif",
+      padding: "16px",
+      maxWidth: 420,
+      margin: "0 auto",
+      display: "flex",
+      flexDirection: "column",
+      gap: 16,
+    }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap');
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { background: #080808; }
+        
+        .btn-ghost {
           background: transparent;
-          color: #111827;
+          border: 1px solid rgba(255,255,255,0.12);
+          color: #fff;
+          border-radius: 12px;
+          padding: 10px 16px;
+          font-size: 11px;
+          font-weight: 700;
+          letter-spacing: 1px;
+          text-transform: uppercase;
+          cursor: pointer;
+          transition: all 0.15s;
+          font-family: inherit;
         }
-
-        .guideTitle {
+        .btn-ghost:hover { background: rgba(255,255,255,0.07); border-color: rgba(255,255,255,0.25); }
+        .btn-ghost:active { transform: scale(0.96); }
+        .btn-solid {
+          background: #fff;
+          border: none;
+          color: #000;
+          border-radius: 12px;
+          padding: 10px 20px;
+          font-size: 11px;
+          font-weight: 700;
+          letter-spacing: 1px;
+          text-transform: uppercase;
+          cursor: pointer;
+          transition: all 0.15s;
+          font-family: inherit;
+        }
+        .btn-solid:hover { background: #e5e5e5; }
+        .btn-solid:active { transform: scale(0.96); }
+        .letter-key {
+          height: 36px;
           display: flex;
-          justify-content: space-between;
-          gap: 12px;
-          align-items: end;
-          margin-bottom: 12px;
+          align-items: center;
+          justify-content: center;
+          font-size: 11px;
+          font-weight: 700;
+          border: 1px solid rgba(255,255,255,0.1);
+          border-radius: 8px;
+          color: rgba(255,255,255,0.3);
+          transition: all 0.2s;
+          font-family: 'DM Mono', monospace;
         }
-
-        .guide h3 {
-          margin: 0;
-          font-size: 20px;
+        .letter-key.active {
+          color: #fff;
+          border-color: #00ff88;
+          background: rgba(0,255,136,0.1);
+          box-shadow: 0 0 12px rgba(0,255,136,0.3);
         }
-
-        .guideTitle p {
-          margin: 0;
-          color: #6b7280;
+        .suggestion-chip {
+          padding: 8px 14px;
+          border-radius: 20px;
+          border: 1px solid rgba(255,255,255,0.15);
+          background: rgba(255,255,255,0.05);
           font-size: 12px;
+          font-weight: 700;
+          cursor: pointer;
+          transition: all 0.15s;
+          letter-spacing: 1px;
+          color: #aaa;
         }
-
-        .chips {
-          display: grid;
-          grid-template-columns: repeat(7, 1fr);
-          gap: 8px;
+        .suggestion-chip:hover {
+          background: rgba(255,255,255,0.1);
+          color: #fff;
+          border-color: rgba(255,255,255,0.3);
         }
-
-        .chips span {
-          display: grid;
-          place-items: center;
-          height: 40px;
-          border-radius: 14px;
-          border: 2px solid #111827;
-          font-weight: 900;
-          background: #f7ead0;
+        .pulse-ring {
+          position: absolute;
+          inset: -4px;
+          border-radius: 32px;
+          border: 2px solid rgba(0,255,136,0.4);
+          animation: pulse-ring 1.5s ease infinite;
         }
-
-        .chips span.active {
-          background: #111827;
-          color: #f7ead0;
+        @keyframes pulse-ring {
+          0% { opacity: 1; transform: scale(1); }
+          100% { opacity: 0; transform: scale(1.03); }
         }
-
-        .note {
-          margin: 12px 0 0;
-          color: #6b7280;
+        .scan-line {
+          position: absolute;
+          left: 0; right: 0;
+          height: 1px;
+          background: linear-gradient(90deg, transparent, rgba(0,255,136,0.6), transparent);
+          animation: scan 3s linear infinite;
+          pointer-events: none;
+          z-index: 2;
+        }
+        @keyframes scan {
+          0% { top: 0; opacity: 0; }
+          5% { opacity: 1; }
+          95% { opacity: 1; }
+          100% { top: 100%; opacity: 0; }
+        }
+        .confidence-bar {
+          height: 3px;
+          background: rgba(255,255,255,0.08);
+          border-radius: 10px;
+          overflow: hidden;
+          margin-top: 6px;
+        }
+        .confidence-fill {
+          height: 100%;
+          border-radius: 10px;
+          transition: width 0.2s ease, background 0.3s;
+        }
+        .word-token {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          padding: 4px 10px;
+          background: rgba(255,255,255,0.08);
+          border-radius: 20px;
           font-size: 13px;
-          line-height: 1.45;
+          font-weight: 600;
+          color: #ccc;
         }
-
-        @media (min-width: 900px) {
-          .app {
-            max-width: 1180px;
-            margin: 0 auto;
-            display: grid;
-            grid-template-columns: 1.3fr 0.7fr;
-            gap: 18px;
-          }
-
-          .hero {
-            grid-column: 1 / -1;
-          }
-
-          .camera {
-            aspect-ratio: 16 / 9;
-          }
-
-          .outputCard,
-          .guide {
-            margin-top: 0;
-          }
-
-          .guide {
-            align-self: start;
-          }
-        }a
-
-        @media (max-width: 390px) {
-          h1 {
-            font-size: 36px;
-          }
-
-          .letterBubble {
-            width: 100px;
-            height: 100px;
-          }
-
-          .chips {
-            grid-template-columns: repeat(6, 1fr);
-          }
+        .word-token.current {
+          background: rgba(0,255,136,0.12);
+          color: #00ff88;
+          border: 1px solid rgba(0,255,136,0.3);
         }
       `}</style>
+
+      {/* Header */}
+      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div>
+          <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: -0.5 }}>Gestura</div>
+          <div style={{ fontSize: 10, color: "#555", letterSpacing: 2, textTransform: "uppercase", marginTop: 2 }}>ASL Translator</div>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div style={{
+            width: 7, height: 7, borderRadius: "50%",
+            background: isLive ? "#00ff88" : "#555",
+            boxShadow: isLive ? "0 0 8px #00ff88" : "none",
+            transition: "all 0.3s"
+          }} />
+          <span style={{ fontSize: 10, fontWeight: 700, color: isLive ? "#00ff88" : "#555", letterSpacing: 2, textTransform: "uppercase" }}>
+            {isLoading ? "Loading" : isLive ? "Live" : "Offline"}
+          </span>
+        </div>
+      </header>
+
+      {/* Tabs */}
+      <div style={{ display: "flex", gap: 4, background: "rgba(255,255,255,0.05)", borderRadius: 14, padding: 4 }}>
+        {["translate", "guide"].map(tab => (
+          <button
+            key={tab}
+            onClick={() => setMode(tab)}
+            style={{
+              flex: 1,
+              padding: "8px",
+              borderRadius: 10,
+              border: "none",
+              background: mode === tab ? "#fff" : "transparent",
+              color: mode === tab ? "#000" : "#666",
+              fontSize: 12,
+              fontWeight: 700,
+              cursor: "pointer",
+              textTransform: "uppercase",
+              letterSpacing: 1,
+              transition: "all 0.2s",
+              fontFamily: "inherit"
+            }}
+          >
+            {tab}
+          </button>
+        ))}
+      </div>
+
+      {mode === "translate" ? (
+        <>
+          {/* Camera viewport */}
+          <div style={{ position: "relative", width: "100%", aspectRatio: "1", background: "#000", borderRadius: 28, overflow: "hidden", border: "1px solid rgba(255,255,255,0.08)" }}>
+            {isLoading && (
+              <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "#000", zIndex: 10, flexDirection: "column", gap: 12 }}>
+                <div style={{ width: 36, height: 36, border: "2px solid rgba(255,255,255,0.1)", borderTop: "2px solid #00ff88", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
+                <span style={{ fontSize: 11, letterSpacing: 2, color: "#555", textTransform: "uppercase" }}>Loading Vision</span>
+              </div>
+            )}
+
+            <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+
+            <video ref={videoRef} style={{ width: "100%", height: "100%", objectFit: "cover", transform: "scaleX(-1)" }} playsInline muted />
+            <canvas ref={canvasRef} width={640} height={640} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", transform: "scaleX(-1)", pointerEvents: "none", zIndex: 1 }} />
+
+            {isLive && <div className="scan-line" />}
+            {handVisible && <div className="pulse-ring" />}
+
+            {/* AR Letter overlay */}
+            {isLive && <ARLabel letter={cleanLetter} confidence={confidence} />}
+
+            {/* Corner brackets (AR aesthetic) */}
+            {["tl","tr","bl","br"].map(c => (
+              <div key={c} style={{
+                position: "absolute",
+                width: 20, height: 20,
+                borderColor: "rgba(0,255,136,0.5)",
+                borderStyle: "solid",
+                borderWidth: 0,
+                ...(c === "tl" ? { top: 12, left: 12, borderTopWidth: 2, borderLeftWidth: 2 } : {}),
+                ...(c === "tr" ? { top: 12, right: 12, borderTopWidth: 2, borderRightWidth: 2 } : {}),
+                ...(c === "bl" ? { bottom: 12, left: 12, borderBottomWidth: 2, borderLeftWidth: 2 } : {}),
+                ...(c === "br" ? { bottom: 12, right: 12, borderBottomWidth: 2, borderRightWidth: 2 } : {}),
+                zIndex: 3
+              }} />
+            ))}
+
+            {/* Status pill */}
+            <div style={{
+              position: "absolute", bottom: 14, right: 14,
+              background: "rgba(0,0,0,0.7)",
+              backdropFilter: "blur(10px)",
+              borderRadius: 12,
+              padding: "8px 12px",
+              border: "1px solid rgba(255,255,255,0.08)",
+              zIndex: 3,
+              minWidth: 100
+            }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, fontWeight: 700, color: "#666", textTransform: "uppercase", letterSpacing: 1 }}>
+                <span>Stable</span>
+                <span style={{ color: confidence > 70 ? "#00ff88" : confidence > 40 ? "#ffcc00" : "#666" }}>{confidence}%</span>
+              </div>
+              <div className="confidence-bar">
+                <div className="confidence-fill" style={{
+                  width: `${confidence}%`,
+                  background: confidence > 70 ? "#00ff88" : confidence > 40 ? "#ffcc00" : "#ff6644"
+                }} />
+              </div>
+            </div>
+          </div>
+
+          {/* Word suggestions */}
+          {suggestions.length > 0 && (
+            <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 2 }}>
+              {suggestions.map(s => (
+                <button key={s} className="suggestion-chip" onClick={() => applyWord(s)}>{s}</button>
+              ))}
+            </div>
+          )}
+
+          {/* Translation output */}
+          <div style={{
+            background: "#111",
+            borderRadius: 24,
+            padding: 20,
+            border: "1px solid rgba(255,255,255,0.07)"
+          }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: "#444", textTransform: "uppercase", letterSpacing: 2, marginBottom: 12 }}>Translation</div>
+
+            {/* Word tokens */}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, minHeight: 40, marginBottom: 16 }}>
+              {words.map((w, i) => (
+                <span key={i} className="word-token">{w}</span>
+              ))}
+              {currentWord && (
+                <span className="word-token current">{currentWord}<span style={{ opacity: 0.5 }}>_</span></span>
+              )}
+              {!words.length && !currentWord && (
+                <span style={{ fontSize: 14, color: "#333", fontStyle: "italic" }}>Hold a sign to begin…</span>
+              )}
+            </div>
+
+            {/* Actions */}
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="btn-solid" onClick={() => speak(text)} style={{ flex: 1 }}>
+                ▶ Speak
+              </button>
+              <button className="btn-ghost" onClick={addSpace}>Space</button>
+              <button className="btn-ghost" onClick={handleDelete}>⌫</button>
+              <button className="btn-ghost" onClick={() => { setText(""); setWords([]); setCurrentWord(""); setSuggestions([]); }}>✕</button>
+            </div>
+          </div>
+
+          {/* Alphabet indicator */}
+          <div style={{ background: "#111", borderRadius: 24, padding: 16, border: "1px solid rgba(255,255,255,0.07)" }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: "#444", textTransform: "uppercase", letterSpacing: 2, marginBottom: 10 }}>Alphabet</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 5 }}>
+              {LETTERS.map(l => (
+                <div key={l} className={`letter-key ${cleanLetter === l ? "active" : ""}`}>{l}</div>
+              ))}
+            </div>
+          </div>
+        </>
+      ) : (
+        /* Guide mode */
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ background: "#111", borderRadius: 24, padding: 20, border: "1px solid rgba(255,255,255,0.07)" }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: "#444", textTransform: "uppercase", letterSpacing: 2, marginBottom: 16 }}>ASL Reference</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 8 }}>
+              {[
+                { l: "A", d: "Fist, thumb to side" },
+                { l: "B", d: "All fingers up, thumb tucked" },
+                { l: "C", d: "Curved hand open" },
+                { l: "D", d: "Index up, thumb+middle touch" },
+                { l: "E", d: "Fingers bent, thumb under" },
+                { l: "F", d: "Index+thumb pinch, others up" },
+                { l: "G", d: "Index+thumb point sideways" },
+                { l: "H", d: "Index+middle flat sideways" },
+                { l: "I", d: "Pinky only up" },
+                { l: "L", d: "L-shape: index up, thumb out" },
+                { l: "O", d: "All fingertips meet thumb" },
+                { l: "V", d: "Index+middle V spread apart" },
+                { l: "Y", d: "Pinky + thumb extended" },
+                { l: "W", d: "3 fingers up (idx+mid+ring)" },
+              ].map(({ l, d }) => (
+                <div key={l} style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 12,
+                  padding: "10px 14px",
+                  background: "rgba(255,255,255,0.03)",
+                  borderRadius: 14,
+                  border: "1px solid rgba(255,255,255,0.06)"
+                }}>
+                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 20, fontWeight: 700, minWidth: 24, color: "#00ff88" }}>{l}</span>
+                  <span style={{ fontSize: 11, color: "#666", lineHeight: 1.4 }}>{d}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ background: "#111", borderRadius: 24, padding: 20, border: "1px solid rgba(255,255,255,0.07)" }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: "#444", textTransform: "uppercase", letterSpacing: 2, marginBottom: 12 }}>Tips for Better Detection</div>
+            {[
+              "Hold your hand 30–50cm from the camera",
+              "Ensure good, even lighting on your hand",
+              "Hold each sign steady for ~1.5 seconds",
+              "Keep hand centered in the frame",
+              "Lower your hand briefly to add a space between letters",
+            ].map((tip, i) => (
+              <div key={i} style={{ display: "flex", gap: 10, marginBottom: 8, alignItems: "flex-start" }}>
+                <span style={{ color: "#00ff88", fontSize: 11, fontWeight: 700, minWidth: 18, paddingTop: 1 }}>{i + 1}.</span>
+                <span style={{ fontSize: 13, color: "#888", lineHeight: 1.5 }}>{tip}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </main>
   );
 }
